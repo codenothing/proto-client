@@ -150,7 +150,7 @@ protoClient.configureClient({
       match: "transportation.VehicleService.*",
     },
 
-    // Matching all entire namespace to a specific service endpoint
+    // Matching entire namespace to a specific service endpoint
     {
       address: "127.0.0.1:8083",
       match: "veterinarian.*",
@@ -161,12 +161,12 @@ protoClient.configureClient({
 
 ## Retry Options
 
-Every request is wrapped in a retry handle allowing for fully customized handling timeouts and retries. Can be configured at both the overall client and individual request levels.
+Every request is wrapped in a retry function, allowing for fully customized handling of timeouts and retries. Can be configured at both the overall client, and individual request levels.
 
 - `timeout`: Time in milliseconds before cancelling the request. Defaults to 0 for no timeout
 - `retryOptions`: Retry configuration object
   - `retryCount`: Number of times to retry request. Defaults to none
-  - `status`: Status codes request is allowed to retry on. Uses default list of status codes if not defined
+  - `status`: Status code(s) request is allowed to retry on. Uses default list of status codes if not defined
   - `retryOnClientTimeout`: Indicates if retries should be allowed when the client times out. Defaults to true.
 
 ## Request API
