@@ -1,12 +1,11 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { status } from "@grpc/grpc-js";
 import { ProtoClient, ProtoRequest, RequestMethodType } from "../src";
 import { RequestError } from "../src/RequestError";
-import { PROTO_FILE_PATHS } from "./utils";
+import { Customer, GetCustomerRequest, PROTO_FILE_PATHS } from "./utils";
 
 describe("RequestError", () => {
   let client: ProtoClient;
-  let request: ProtoRequest<any, any>;
+  let request: ProtoRequest<GetCustomerRequest, Customer>;
 
   beforeEach(() => {
     client = new ProtoClient({
@@ -21,9 +20,9 @@ describe("RequestError", () => {
       },
     });
 
-    request = new ProtoRequest<any, any>(
+    request = new ProtoRequest<GetCustomerRequest, Customer>(
       client,
-      "animals.Animals.GetAnimal",
+      "customers.Customers.GetCustomer",
       RequestMethodType.UnaryRequest,
       undefined
     );
@@ -32,7 +31,7 @@ describe("RequestError", () => {
   test("should assign parameters and auto set code to aborted", () => {
     const error = new RequestError(status.CANCELLED, request);
     expect(error.message).toStrictEqual(
-      `Cancelled makeUnaryRequest for 'animals.Animals.GetAnimal'`
+      `Cancelled makeUnaryRequest for 'customers.Customers.GetCustomer'`
     );
     expect(error.code).toStrictEqual(status.CANCELLED);
     expect(error.metadata).toStrictEqual(request.metadata);
@@ -41,7 +40,7 @@ describe("RequestError", () => {
   test("should assign default details to non-special codes", () => {
     const error = new RequestError(status.INTERNAL, request);
     expect(error.message).toStrictEqual(
-      `13 INTERNAL: makeUnaryRequest for 'animals.Animals.GetAnimal'`
+      `13 INTERNAL: makeUnaryRequest for 'customers.Customers.GetCustomer'`
     );
     expect(error.code).toStrictEqual(status.INTERNAL);
     expect(error.metadata).toStrictEqual(request.metadata);

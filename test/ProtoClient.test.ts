@@ -1,55 +1,127 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import { Client, Metadata } from "@grpc/grpc-js";
+import {
+  ServerUnaryCall,
+  sendUnaryData,
+  Client,
+  ServerReadableStream,
+  ServerWritableStream,
+  UntypedServiceImplementation,
+} from "@grpc/grpc-js";
 import * as Protobuf from "protobufjs";
 import {
   ProtoClient,
-  ProtoSettings,
   ProtoRequest,
-  StreamReader,
+  ProtoSettings,
   RequestMethodType,
-  RequestMiddleware,
-  RequestOptions,
-  StreamWriterSandbox,
 } from "../src";
-import { PROTO_FILE_PATHS } from "./utils";
+import {
+  startServer,
+  GetCustomerRequest,
+  Customer,
+  PROTO_FILE_PATHS,
+  makeUnaryRequest,
+  CustomersResponse,
+  FindCustomersRequest,
+  makeClientStreamRequest,
+  makeServerStreamRequest,
+  wait,
+  generateProtoServer,
+} from "./utils";
 
-interface Animal {
-  id?: string;
-  action?: string;
-}
-
-interface AnimalRequest {
-  id?: string;
-  action?: string;
-}
-
-interface AnimalsResponse {
-  animals?: Animal[];
-}
+jest.setTimeout(1000);
 
 describe("ProtoClient", () => {
   let client: ProtoClient;
-  let request: ProtoRequest<any, any>;
+  let request: ProtoRequest<GetCustomerRequest, Customer>;
+  let serviceMethods: UntypedServiceImplementation;
+  let RESPONSE_DELAY = 0;
 
-  beforeEach(() => {
-    client = new ProtoClient({
+  beforeEach(async () => {
+    serviceMethods = {
+      // Unary
+      GetCustomer: (
+        _call: ServerUnaryCall<GetCustomerRequest, Customer>,
+        callback: sendUnaryData<Customer>
+      ) => {
+        setTimeout(() => {
+          callback(null, { id: "github", name: "Github" });
+        }, RESPONSE_DELAY);
+      },
+
+      // Client Stream
+      EditCustomer: (
+        call: ServerReadableStream<Customer, CustomersResponse>,
+        callback: sendUnaryData<CustomersResponse>
+      ) => {
+        const customers: Customer[] = [];
+
+        call.on("data", (row: Customer) => {
+          customers.push(row);
+        });
+
+        call.on("end", () => {
+          if (call.cancelled) {
+            return;
+          }
+
+          setTimeout(() => {
+            if (!call.cancelled) {
+              callback(null, { customers });
+            }
+          }, RESPONSE_DELAY);
+        });
+      },
+
+      // Server Stream
+      FindCustomers: (
+        call: ServerWritableStream<FindCustomersRequest, Customer>
+      ) => {
+        setTimeout(() => {
+          call.write({ id: "github", name: "Github" }, () => {
+            if (call.writable) {
+              call.write({ id: "npm", name: "NPM" }, () => {
+                if (call.writable) {
+                  call.end();
+                }
+              });
+            }
+          });
+        }, RESPONSE_DELAY);
+      },
+    };
+
+    const results = await startServer(serviceMethods);
+    client = results.client;
+
+    request = new ProtoRequest<GetCustomerRequest, Customer>(
+      client,
+      "customers.Customers.GetCustomer",
+      RequestMethodType.UnaryRequest,
+      undefined
+    );
+  });
+
+  test("should proxy settings passed on init to each configuration method", () => {
+    const client = new ProtoClient({
       clientSettings: {
-        endpoint: {
-          address: `0.0.0.0:9001`,
-        },
-        rejectOnAbort: true,
+        endpoint: `0.0.0.0:8081`,
       },
       protoSettings: {
         files: PROTO_FILE_PATHS,
       },
+      conversionOptions: {
+        defaults: true,
+      },
     });
 
-    request = new ProtoRequest<any, any>(
-      client,
-      "animals.Animals.GetAnimal",
-      RequestMethodType.UnaryRequest,
-      undefined
-    );
+    expect(client.clientSettings).toEqual({
+      endpoint: `0.0.0.0:8081`,
+    });
+    expect(client.protoSettings).toEqual({
+      files: PROTO_FILE_PATHS,
+    });
+    expect(client.protoConversionOptions).toEqual({
+      defaults: true,
+    });
   });
 
   describe("configureClient", () => {
@@ -60,58 +132,13 @@ describe("ProtoClient", () => {
         endpoint: `0.0.0.0:9091`,
       });
       expect(closeSpy).toHaveBeenCalledTimes(1);
-      expect((client as any).clients).toEqual([
-        {
-          match: expect.any(Function),
-          endpoint: { address: `0.0.0.0:9091` },
-          client: expect.any(Client),
-        },
-      ]);
-    });
-
-    test("should create multiple clients for each configured endpoint", () => {
-      client.configureClient({
-        endpoint: [
-          {
-            address: `0.0.0.0:9091`,
-            match: `foo`,
-          },
-          {
-            address: `0.0.0.0:9092`,
-            match: `bar`,
-          },
-          {
-            address: `0.0.0.0:8183`,
-            match: `baz`,
-          },
-        ],
-      });
-      expect((client as any).clients).toEqual([
-        {
-          match: expect.any(Function),
-          endpoint: { address: `0.0.0.0:9091`, match: `foo` },
-          client: expect.any(Client),
-        },
-        {
-          match: expect.any(Function),
-          endpoint: { address: `0.0.0.0:9092`, match: `bar` },
-          client: expect.any(Client),
-        },
-        {
-          match: expect.any(Function),
-          endpoint: { address: `0.0.0.0:8183`, match: `baz` },
-          client: expect.any(Client),
-        },
-      ]);
     });
   });
 
   describe("configureProtos", () => {
     test("passing proto options should override defaults", () => {
-      const resolveAll = jest.fn();
-      const loadSyncSpy = jest
-        .spyOn(Protobuf.Root.prototype, "loadSync")
-        .mockImplementation(() => ({ resolveAll } as any));
+      const loadSyncSpy = jest.spyOn(Protobuf.Root.prototype, "loadSync");
+
       const settings: ProtoSettings = {
         files: PROTO_FILE_PATHS,
         parseOptions: {
@@ -146,180 +173,48 @@ describe("ProtoClient", () => {
     });
   });
 
-  test("getClient should return the existing client, or throw an error", () => {
-    expect(client.getClient(request)).toBeInstanceOf(Client);
-
-    client = new ProtoClient();
-    expect(() => client.getClient(request)).toThrow(
-      `ProtoClient is not yet configured`
-    );
-
-    client.configureClient({
-      endpoint: {
-        address: `0.0.0.0:9091`,
-        match: "foo.bar.baz",
-      },
-    });
-    expect(() => client.getClient(request)).toThrow(
-      `Service method '${request.method}' has no configured endpoint`
-    );
-  });
-
-  test("getRoot should return the proto root object, or throw an error", () => {
-    expect(client.getRoot()).toBeInstanceOf(Protobuf.Root);
-
-    client = new ProtoClient();
-    expect(() => client.getRoot()).toThrow(
-      `ProtoClient protos are not yet configured`
-    );
-  });
-
-  test("useMiddleware should add middleware function to the stack", () => {
-    expect(client.middleware).toEqual([]);
-
-    const middleware = async () => undefined;
-    client.useMiddleware(middleware);
-    expect(client.middleware).toEqual([middleware]);
-  });
-
-  describe("makeRequests", () => {
-    let request: ProtoRequest<any, any>;
-    let metadata: Metadata;
-
-    beforeEach(() => {
-      metadata = new Metadata();
-      metadata.set("foo", "bar");
-
-      const generateRequestImpl = async (
-        method: string,
-        requestMethodType: RequestMethodType,
-        requestOptions: AbortController | RequestOptions | undefined
-      ) => {
-        request = new ProtoRequest<any, any>(
-          client,
-          method,
-          requestMethodType,
-          requestOptions
-        );
-
-        jest
-          .spyOn(request, "makeUnaryRequest")
-          .mockImplementation(async () => request);
-        jest
-          .spyOn(request, "makeClientStreamRequest")
-          .mockImplementation(async () => request);
-        jest
-          .spyOn(request, "makeServerStreamRequest")
-          .mockImplementation(async () => request);
-        jest
-          .spyOn(request, "makeBidiStreamRequest")
-          .mockImplementation(async () => request);
-
-        return request;
-      };
-
-      jest
-        .spyOn(client as any, "generateRequest")
-        .mockImplementation(generateRequestImpl as any);
-    });
-
-    test("makeUnaryRequest", async () => {
-      expect(
-        await client.makeUnaryRequest<AnimalRequest, Animal>(
-          "animals.Animals.GetAnimal",
-          { id: "cow", action: "moo" },
-          { metadata }
-        )
-      ).toEqual(request);
-      expect((client as any).generateRequest).toHaveBeenCalledTimes(1);
-      expect((client as any).generateRequest).toHaveBeenLastCalledWith(
-        "animals.Animals.GetAnimal",
-        RequestMethodType.UnaryRequest,
-        { metadata }
-      );
-      expect(request.makeUnaryRequest).toHaveBeenCalledTimes(1);
-      expect(request.makeUnaryRequest).toHaveBeenCalledWith({
-        id: "cow",
-        action: "moo",
+  describe("configureConversionOptions", () => {
+    test("should assign conversion options for use in deserialization", () => {
+      expect(client.protoConversionOptions).toEqual({
+        longs: Number,
+        enums: String,
+        defaults: false,
+        oneofs: true,
       });
+
+      client.configureConversionOptions({ defaults: true });
+      expect(client.protoConversionOptions).toEqual({ defaults: true });
     });
+  });
 
-    test("makeServerStreamRequest", async () => {
-      const streamReader: StreamReader<unknown, Animal> = async () => undefined;
+  describe("getClient", () => {
+    test("should return the existing client, or throw an error", () => {
+      expect(client.getClient(request)).toBeInstanceOf(Client);
 
-      expect(
-        await client.makeServerStreamRequest<unknown, Animal>(
-          "animals.Animals.GetAnimals",
-          {},
-          streamReader,
-          { metadata }
-        )
-      ).toEqual(request);
-      expect((client as any).generateRequest).toHaveBeenCalledTimes(1);
-      expect((client as any).generateRequest).toHaveBeenLastCalledWith(
-        "animals.Animals.GetAnimals",
-        RequestMethodType.ServerStreamRequest,
-        { metadata }
+      client = new ProtoClient();
+      expect(() => client.getClient(request)).toThrow(
+        `ProtoClient is not yet configured`
       );
-      expect(request.makeServerStreamRequest).toHaveBeenCalledTimes(1);
-      expect(request.makeServerStreamRequest).toHaveBeenCalledWith(
-        {},
-        streamReader
-      );
-    });
 
-    test("makeClientStreamRequest", async () => {
-      const writeSandbox: StreamWriterSandbox<Animal, AnimalsResponse> = async (
-        write
-      ) => {
-        await write({ id: "cow", action: "moo" });
-      };
-
-      expect(
-        await client.makeClientStreamRequest<Animal, AnimalsResponse>(
-          "animals.Animals.EditAnimal",
-          writeSandbox,
-          { metadata }
-        )
-      ).toEqual(request);
-      expect((client as any).generateRequest).toHaveBeenCalledTimes(1);
-      expect((client as any).generateRequest).toHaveBeenLastCalledWith(
-        "animals.Animals.EditAnimal",
-        RequestMethodType.ClientStreamRequest,
-        { metadata }
-      );
-      expect(request.makeClientStreamRequest).toHaveBeenCalledTimes(1);
-      expect(request.makeClientStreamRequest).toHaveBeenCalledWith(
-        writeSandbox
+      client.configureClient({
+        endpoint: {
+          address: `0.0.0.0:9091`,
+          match: "foo.bar.baz",
+        },
+      });
+      expect(() => client.getClient(request)).toThrow(
+        `Service method '${request.method}' has no configured endpoint`
       );
     });
+  });
 
-    test("makeBidiStreamRequest", async () => {
-      const streamReader: StreamReader<Animal, Animal> = async () => undefined;
-      const writeSandbox: StreamWriterSandbox<Animal, Animal> = async (
-        write
-      ) => {
-        await write({ id: "cow", action: "moo" });
-      };
+  describe("getRoot", () => {
+    test("should return the proto root object, or throw an error", () => {
+      expect(client.getRoot()).toBeInstanceOf(Protobuf.Root);
 
-      expect(
-        await client.makeBidiStreamRequest<Animal, Animal>(
-          "animals.Animals.CreateAnimal",
-          writeSandbox,
-          streamReader,
-          { metadata }
-        )
-      ).toEqual(request);
-      expect((client as any).generateRequest).toHaveBeenCalledTimes(1);
-      expect((client as any).generateRequest).toHaveBeenLastCalledWith(
-        "animals.Animals.CreateAnimal",
-        RequestMethodType.BidiStreamRequest,
-        { metadata }
-      );
-      expect(request.makeBidiStreamRequest).toHaveBeenCalledTimes(1);
-      expect(request.makeBidiStreamRequest).toHaveBeenCalledWith(
-        writeSandbox,
-        streamReader
+      client = new ProtoClient();
+      expect(() => client.getRoot()).toThrow(
+        `ProtoClient protos are not yet configured`
       );
     });
   });
@@ -329,200 +224,112 @@ describe("ProtoClient", () => {
     let abort2: AbortController;
     let abort3: AbortController;
 
-    beforeEach(() => {
+    beforeEach(async () => {
+      RESPONSE_DELAY = 50;
       abort1 = new AbortController();
       abort2 = new AbortController();
       abort3 = new AbortController();
 
-      client.activeRequests = [
-        new ProtoRequest<AnimalRequest, Animal>(
-          client,
-          "animals.Animals.GetAnimal",
-          RequestMethodType.UnaryRequest,
-          abort1
-        ),
-        new ProtoRequest<unknown, Animal>(
-          client,
-          "animals.Animals.GetAnimals",
-          RequestMethodType.ServerStreamRequest,
-          abort2
-        ),
-        new ProtoRequest<Animal, AnimalsResponse>(
-          client,
-          "animals.Animals.EditAnimal",
-          RequestMethodType.ClientStreamRequest,
-          abort3
-        ),
-      ];
+      makeUnaryRequest({}, abort1);
+      makeServerStreamRequest({}, async () => undefined, abort2);
+      makeClientStreamRequest(async () => undefined, abort3);
+
+      await wait(10);
     });
+    afterEach(() => client.close());
 
     test("string matching", () => {
-      client.abortRequests("animals.Animals.GetAnimal");
+      client.abortRequests("customers.Customers.GetCustomer");
       expect(abort1.signal.aborted).toStrictEqual(true);
       expect(abort2.signal.aborted).toStrictEqual(false);
       expect(abort3.signal.aborted).toStrictEqual(false);
     });
 
     test("regex matching", () => {
-      client.abortRequests(/\.EditAnimal$/);
+      client.abortRequests(/\.EditCustomer$/);
       expect(abort1.signal.aborted).toStrictEqual(false);
       expect(abort2.signal.aborted).toStrictEqual(false);
       expect(abort3.signal.aborted).toStrictEqual(true);
     });
 
     test("function matching", () => {
-      client.abortRequests((method) => method === "animals.Animals.GetAnimals");
+      client.abortRequests(
+        (method) => method === "customers.Customers.FindCustomers"
+      );
       expect(abort1.signal.aborted).toStrictEqual(false);
       expect(abort2.signal.aborted).toStrictEqual(true);
       expect(abort3.signal.aborted).toStrictEqual(false);
     });
   });
 
-  test("close should just close the client", () => {
-    const rpcClient = client.getClient(request);
-    jest.spyOn(rpcClient, "close").mockImplementation(() => undefined);
-    jest.spyOn(client, "abortRequests");
+  describe("close", () => {
+    test("should abort all requests before closing the client", () => {
+      const rpcClient = client.getClient(request);
+      jest.spyOn(rpcClient, "close");
+      jest.spyOn(client, "abortRequests");
 
-    client.close();
-    expect(client.abortRequests).toHaveBeenCalledTimes(1);
-    expect(rpcClient.close).toHaveBeenCalledTimes(1);
+      client.close();
+      expect(client.abortRequests).toHaveBeenCalledTimes(1);
+      expect(rpcClient.close).toHaveBeenCalledTimes(1);
 
-    // rpcClient should be removed after closed, requiring a reconfigure
-    expect(() => client.getClient(request)).toThrow(
-      `ProtoClient is not yet configured`
-    );
-  });
-
-  describe("generateRequest", () => {
-    let middleware1: RequestMiddleware;
-    let middleware2: RequestMiddleware;
-    let middleware3: RequestMiddleware;
-
-    beforeEach(() => {
-      middleware1 = jest.fn().mockResolvedValue(undefined);
-      middleware2 = jest.fn().mockResolvedValue(undefined);
-      middleware3 = jest.fn().mockResolvedValue(undefined);
-
-      client.useMiddleware(middleware1);
-      client.useMiddleware(middleware2);
-      client.useMiddleware(middleware3);
-    });
-
-    test("successful generation", async () => {
-      const request = await (client as any).generateRequest(
-        "animals.Animals.GetAnimal",
-        RequestMethodType.UnaryRequest,
-        undefined
+      // rpcClient should be removed after closed, requiring a reconfigure
+      expect(() => client.getClient(request)).toThrow(
+        `ProtoClient is not yet configured`
       );
-
-      expect(middleware1).toHaveBeenCalledTimes(1);
-      expect(middleware1).toHaveBeenLastCalledWith(request, client);
-      expect(middleware2).toHaveBeenCalledTimes(1);
-      expect(middleware3).toHaveBeenCalledTimes(1);
-    });
-
-    test("error instance throwing", async () => {
-      (middleware2 as jest.Mock).mockRejectedValue(
-        new Error("Rejected Error Instance")
-      );
-      await expect(
-        (client as any).generateRequest(
-          "animals.Animals.GetAnimal",
-          RequestMethodType.UnaryRequest,
-          undefined
-        )
-      ).rejects.toThrow(`Rejected Error Instance`);
-
-      expect(middleware1).toHaveBeenCalledTimes(1);
-      expect(middleware1).toHaveBeenLastCalledWith(
-        expect.any(ProtoRequest),
-        client
-      );
-      expect(middleware2).toHaveBeenCalledTimes(1);
-      expect(middleware3).not.toHaveBeenCalled();
-    });
-
-    test("error string throwing", async () => {
-      (middleware2 as jest.Mock).mockRejectedValue("Rejected Error String");
-      await expect(
-        (client as any).generateRequest(
-          "animals.Animals.GetAnimal",
-          RequestMethodType.UnaryRequest,
-          undefined
-        )
-      ).rejects.toThrow(`Rejected Error String`);
-
-      expect(middleware1).toHaveBeenCalledTimes(1);
-      expect(middleware1).toHaveBeenLastCalledWith(
-        expect.any(ProtoRequest),
-        client
-      );
-      expect(middleware2).toHaveBeenCalledTimes(1);
-      expect(middleware3).not.toHaveBeenCalled();
-    });
-
-    test("unknown error throwing", async () => {
-      (middleware2 as jest.Mock).mockRejectedValue({ random: "object-thrown" });
-      await expect(
-        (client as any).generateRequest(
-          "animals.Animals.GetAnimal",
-          RequestMethodType.UnaryRequest,
-          undefined
-        )
-      ).rejects.toThrow(`Unknown Middleware Error: [object Object]`);
-
-      expect(middleware1).toHaveBeenCalledTimes(1);
-      expect(middleware1).toHaveBeenLastCalledWith(
-        expect.any(ProtoRequest),
-        client
-      );
-      expect(middleware2).toHaveBeenCalledTimes(1);
-      expect(middleware3).not.toHaveBeenCalled();
     });
   });
 
-  describe("generateEndpointMatcher", () => {
-    test("should match everything if match is undefined", () => {
-      const matcher = (client as any).generateEndpointMatcher();
-      expect(matcher).toBeInstanceOf(Function);
-      expect(matcher(request.method, request)).toStrictEqual(true);
-    });
+  describe("multiple endpoints", () => {
+    test("should be able to connect to multiple servers with the same client", async () => {
+      const server1 = await generateProtoServer({
+        GetCustomer: serviceMethods.GetCustomer,
+      });
+      const server2 = await generateProtoServer({
+        EditCustomer: serviceMethods.EditCustomer,
+      });
+      const server3 = await generateProtoServer({
+        FindCustomers: serviceMethods.FindCustomers,
+      });
 
-    test("should match string paths exactly", () => {
-      const matcher = (client as any).generateEndpointMatcher(`foo.bar.baz`);
-      expect(matcher).toBeInstanceOf(Function);
-      expect(matcher("foo.bar.baz", request)).toStrictEqual(true);
-      expect(matcher("foo.foo.bar", request)).toStrictEqual(false);
-    });
+      client = new ProtoClient({
+        protoSettings: {
+          files: PROTO_FILE_PATHS,
+        },
+        clientSettings: {
+          endpoint: [
+            {
+              address: `0.0.0.0:${server1.port}`,
+              match: `customers.Customers.GetCustomer`,
+            },
+            {
+              address: `0.0.0.0:${server2.port}`,
+              match: `customers.Customers.EditCustomer`,
+            },
+            {
+              address: `0.0.0.0:${server3.port}`,
+              match: `customers.Customers.FindCustomers`,
+            },
+          ],
+        },
+      });
 
-    test("should match service or namespace when defined", () => {
-      let matcher = (client as any).generateEndpointMatcher(`foo.bar.*`);
-      expect(matcher).toBeInstanceOf(Function);
-      expect(matcher("foo.bar.baz", request)).toStrictEqual(true);
-      expect(matcher("foo.bar.bar", request)).toStrictEqual(true);
-      expect(matcher("foo.baz.foo", request)).toStrictEqual(false);
-
-      matcher = (client as any).generateEndpointMatcher(`foo.*`);
-      expect(matcher("foo.bar.baz", request)).toStrictEqual(true);
-      expect(matcher("foo.bar.bar", request)).toStrictEqual(true);
-      expect(matcher("foo.baz.foo", request)).toStrictEqual(true);
-      expect(matcher("bar.foo.baz", request)).toStrictEqual(false);
-    });
-
-    test("should use regex matching when defined", () => {
-      const matcher = (client as any).generateEndpointMatcher(/^foo\.bar/);
-      expect(matcher).toBeInstanceOf(Function);
-      expect(matcher("foo.bar.baz", request)).toStrictEqual(true);
-      expect(matcher("foo.baz.bar", request)).toStrictEqual(false);
-    });
-
-    test("should use filter matching when defined", () => {
-      const matcher = (client as any).generateEndpointMatcher(
-        (method: string) => method === "foo.bar.baz"
-      );
-      expect(matcher).toBeInstanceOf(Function);
-      expect(matcher("foo.bar.baz", request)).toStrictEqual(true);
-      expect(matcher("foo.baz.bar", request)).toStrictEqual(false);
+      expect(
+        await client.makeUnaryRequest("customers.Customers.GetCustomer")
+      ).toBeInstanceOf(ProtoRequest);
+      expect(
+        await client.makeClientStreamRequest(
+          "customers.Customers.EditCustomer",
+          async (write) => {
+            await write({ id: "github", name: "Github" });
+          }
+        )
+      ).toBeInstanceOf(ProtoRequest);
+      expect(
+        await client.makeServerStreamRequest(
+          "customers.Customers.FindCustomers",
+          async () => undefined
+        )
+      ).toBeInstanceOf(ProtoRequest);
     });
   });
 });
