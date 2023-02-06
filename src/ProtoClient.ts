@@ -1,140 +1,27 @@
 import { EventEmitter } from "events";
 import * as Protobuf from "protobufjs";
-import {
-  ChannelCredentials,
-  Client,
-  ClientOptions,
-  credentials,
-} from "@grpc/grpc-js";
-import {
-  ProtoRequest,
-  StreamReader,
-  RequestOptions,
-  StreamWriterSandbox,
-} from "./ProtoRequest";
-import type { VerifyOptions } from "@grpc/grpc-js/build/src/channel-credentials";
+import { ChannelCredentials, Client, credentials } from "@grpc/grpc-js";
+import { ProtoRequest } from "./ProtoRequest";
 import { RequestMethodType } from "./constants";
-
-// Shortcut reference to generic ProtoRequest type
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyProtoRequest = ProtoRequest<any, any>;
-
-// Matching util for method endpoints
-type EndpointMatcher = (method: string, request: AnyProtoRequest) => boolean;
-
-/**
- * Middleware to run before each request
- * @param request Initialized, but not started, gRPC request
- * @param client Parent client instance
- */
-export type RequestMiddleware = (
-  request: AnyProtoRequest,
-  client: ProtoClient
-) => Promise<void>;
-
-/**
- * Service endpoint configuration
- */
-export interface ClientEndpoint {
-  /**
-   * Remote server address (with port built in)
-   */
-  address: string;
-
-  /**
-   * For configuring secure credentials when connecting to service endpoint
-   */
-  credentials?:
-    | ChannelCredentials
-    | {
-        /**
-         * Root certificate data
-         */
-        rootCerts?: Buffer;
-
-        /**
-         * Client certificate private key, if available
-         */
-        privateKey?: Buffer;
-
-        /**
-         * Client certificate key chain, if available
-         */
-        certChain?: Buffer;
-
-        /**
-         * Additional options to modify certificate verification
-         */
-        verifyOptions?: VerifyOptions;
-      };
-
-  /**
-   * gRPC client options for a connection
-   */
-  clientOptions?: ClientOptions;
-
-  /**
-   * Custom matching of proto method namespace to client endpoint
-   */
-  match?: string | RegExp | EndpointMatcher;
-}
-
-/**
- * Client Settings
- */
-export interface ClientSettings {
-  /**
-   * Either
-   */
-  endpoint: string | ClientEndpoint | ClientEndpoint[];
-
-  /**
-   * Indicates if error should be thrown when caller cancels the request
-   */
-  rejectOnAbort?: true;
-
-  /**
-   * Time in milliseconds before cancelling the request. Defaults to 0 for no timeout
-   */
-  timeout?: number;
-
-  /**
-   * Retry logic for every request
-   */
-  retryOptions?: RequestOptions["retryOptions"];
-}
-
-/**
- * Protobuf parsing settings
- */
-export interface ProtoSettings {
-  /**
-   * Custom root protobuf namespace, for skipping proto file paths
-   */
-  root?: Protobuf.Root;
-
-  /**
-   * Proto file path(s)
-   */
-  files?: string | string[];
-
-  /**
-   * Parsing options for proto files passed
-   */
-  parseOptions?: Protobuf.IParseOptions;
-
-  /**
-   * Message conversion options
-   */
-  conversionOptions?: Protobuf.IConversionOptions;
-}
+import type { UntypedProtoRequest } from "./untyped";
+import type {
+  ClientEndpoint,
+  ClientSettings,
+  EndpointMatcher,
+  ProtoSettings,
+  RequestMiddleware,
+  RequestOptions,
+  StreamReader,
+  StreamWriterSandbox,
+} from "./interfaces";
+import { generateEndpointMatcher } from "./util";
 
 export interface ProtoClient {
-  on(event: "request", listener: (request: AnyProtoRequest) => void): this;
+  on(event: "request", listener: (request: UntypedProtoRequest) => void): this;
 
-  off(event: "request", listener: (request: AnyProtoRequest) => void): this;
+  off(event: "request", listener: (request: UntypedProtoRequest) => void): this;
 
-  emit(eventName: "request", request: AnyProtoRequest): boolean;
+  emit(eventName: "request", request: UntypedProtoRequest): boolean;
 }
 
 /**
@@ -166,7 +53,7 @@ export class ProtoClient extends EventEmitter {
   /**
    * List of currently active requests
    */
-  public activeRequests: AnyProtoRequest[] = [];
+  public activeRequests: UntypedProtoRequest[] = [];
 
   /**
    * Middleware to run before each request
@@ -229,7 +116,7 @@ export class ProtoClient extends EventEmitter {
     this.clients = endpoints.map((endpoint) => {
       if (typeof endpoint === "string") {
         return {
-          match: this.generateEndpointMatcher(),
+          match: generateEndpointMatcher(),
           endpoint: { address: endpoint },
           client: new Client(endpoint, credentials.createInsecure()),
         };
@@ -256,7 +143,7 @@ export class ProtoClient extends EventEmitter {
       // Combined matcher with gRPC client connection
       return {
         endpoint,
-        match: this.generateEndpointMatcher(endpoint.match),
+        match: generateEndpointMatcher(endpoint.match),
         client: new Client(endpoint.address, creds, endpoint.clientOptions),
       };
     });
@@ -296,7 +183,7 @@ export class ProtoClient extends EventEmitter {
    * throwing an error if not yet configured
    * @param request Active request looking for it's client endpoint
    */
-  public getClient(request: AnyProtoRequest): Client {
+  public getClient(request: UntypedProtoRequest): Client {
     if (!this.clients.length) {
       throw new Error(`ProtoClient is not yet configured`);
     }
@@ -581,7 +468,7 @@ export class ProtoClient extends EventEmitter {
 
   // Actual abortRequests for the overloads above
   public abortRequests(match: string | RegExp | EndpointMatcher): void {
-    const matcher: EndpointMatcher = this.generateEndpointMatcher(match);
+    const matcher: EndpointMatcher = generateEndpointMatcher(match);
 
     this.activeRequests.forEach((request) => {
       if (matcher(request.method, request)) {
@@ -650,35 +537,11 @@ export class ProtoClient extends EventEmitter {
    * Removes request from the active request list
    * @param request Request to be removed
    */
-  private removeActiveRequest(request: AnyProtoRequest) {
+  private removeActiveRequest(request: UntypedProtoRequest) {
     const index = this.activeRequests.indexOf(request);
 
     if (index > -1) {
       this.activeRequests.splice(index, 1);
-    }
-  }
-
-  /**
-   * Generates a function for matching namespaces to requests
-   * @param match Multi-type endpoint matcher to convert
-   * @returns Matcher function
-   */
-  private generateEndpointMatcher(
-    match?: string | RegExp | EndpointMatcher
-  ): EndpointMatcher {
-    if (!match) {
-      return () => true;
-    } else if (typeof match === "string") {
-      if (/\.\*$/.test(match)) {
-        const matchNamespace = match.replace(/\*$/, "");
-        return (method) => method.startsWith(matchNamespace);
-      } else {
-        return (method) => method === match;
-      }
-    } else if (match instanceof RegExp) {
-      return (method) => match.test(method);
-    } else {
-      return match;
     }
   }
 }

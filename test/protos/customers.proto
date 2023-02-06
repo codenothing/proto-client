@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package customers;
+
+message Customer {
+	string id = 1;
+	string name = 2;
+}
+
+message GetCustomerRequest {
+	string id = 1;
+}
+
+message FindCustomersRequest {
+	string name = 1;
+}
+
+message CustomersResponse {
+	repeated Customer customers = 1;
+}
+
+service Customers {
+	rpc GetCustomer (GetCustomerRequest) returns (Customer);
+	rpc FindCustomers (FindCustomersRequest) returns (stream Customer);
+	rpc EditCustomer (stream Customer) returns (CustomersResponse);
+	rpc CreateCustomers (stream Customer) returns (stream Customer);
+}

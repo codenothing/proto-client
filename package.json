@@ -16,7 +16,7 @@
     "build": "yarn clean && tsc -p tsconfig.json",
     "lint": "eslint . --ext .ts",
     "pretest": "yarn build && yarn lint",
-    "test": "jest --verbose --coverage",
+    "test": "jest --verbose --coverage --collectCoverageFrom=src/**",
     "prepublish": "yarn test"
   },
   "keywords": [

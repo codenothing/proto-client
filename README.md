@@ -21,44 +21,50 @@ Options:
 
 ### Example
 
-Given the following `animals.proto` file, running the `proto-client` command will generate a js/ts client scaffold for easy functional request making
+Given the following `customers.proto` file, running the `proto-client` command will generate a js/ts client scaffold for easy functional request making
 
 ```proto
 syntax = "proto3";
-package animals;
 
-message Animal {
-  string id = 1;
-  string name = 2;
-  string action = 3;
+package customers;
+
+message Customer {
+	string id = 1;
+	string name = 2;
 }
 
-message AnimalRequest {
-  string name = 1;
+message GetCustomerRequest {
+	string id = 1;
 }
 
-message CreateAnimalRequest {
-  string name = 1;
-  string action = 2;
+message FindCustomersRequest {
+	string name = 1;
 }
 
-service AnimalService {
-  rpc GetAnimal (AnimalRequest) returns (Animal);
-  rpc CreateAnimal (stream CreateAnimalRequest) returns (stream Animal);
+message CustomersResponse {
+	repeated Customer customers = 1;
 }
+
+service Customers {
+	rpc GetCustomer (GetCustomerRequest) returns (Customer);
+	rpc FindCustomers (FindCustomersRequest) returns (stream Customer);
+	rpc EditCustomer (stream Customer) returns (CustomersResponse);
+	rpc CreateCustomers (stream Customer) returns (stream Customer);
+}
+
 ```
 
 The `client.js` code generated:
 
 ```js
-module.exports.animals = {
-  AnimalService: {
-    GetAnimal: async (data) =>
-      protoClient.makeUnaryRequest("animals.AnimalService.GetAnimal", data),
+module.exports.customers = {
+  Customers: {
+    GetCustomer: async (data) =>
+      protoClient.makeUnaryRequest("customers.Customers.GetCustomer", data),
 
-    CreateAnimal: async (writerSandbox, streamReader) =>
-      protoClient.CreateAnimal(
-        "animals.AnimalService.CreateAnimal",
+    CreateCustomers: async (writerSandbox, streamReader) =>
+      protoClient.CreateCustomers(
+        "customers.Customers.CreateCustomers",
         writerSandbox,
         streamReader
       ),
@@ -69,20 +75,20 @@ module.exports.animals = {
 To make calls:
 
 ```ts
-import { protoClient, animals } from "output/client";
+import { protoClient, customers } from "output/client";
 
 // Configuring service endpoint(s)
 protoClient.configureClient({ endpoint: "127.0.0.1:8080" });
 
 // Unary Requests
-const request = await animals.AnimalService.GetAnimal({ name: "dog" });
-request.result; // Animal
+const request = await customers.Customers.GetCustomer({ name: "Github" });
+request.result; // Customer
 
-// Bidrectional Requests
-await animals.AnimalService.CreateAnimal(
+// Bidirectional Requests
+await customers.Customers.CreateCustomers(
   async (write) => {
-    await write({ name: "dog", action: "bark" });
-    await write({ name: "cat", action: "meow" });
+    await write({ name: "github", action: "Github" });
+    await write({ name: "npm", action: "NPM" });
   },
   async (row) => {
     // ... each streamed row ...
@@ -138,22 +144,22 @@ For multi service architectures, `ProtoClient` comes with built-in support to co
 ```ts
 protoClient.configureClient({
   endpoint: [
-    // Matching all rpc methods of the animals.AnimalService to a specific service endpoint
+    // Matching all rpc methods of the customers.Customers service to a specific service endpoint
     {
       address: "127.0.0.1:8081",
-      match: "animals.AnimalService.*",
+      match: "customers.Customers.*",
     },
 
-    // Matching all rpc methods of the transportation.VehicleService to a specific service endpoint
+    // Matching all rpc methods of the v1.products.TransportationService service to a specific service endpoint
     {
       address: "127.0.0.1:8082",
-      match: "transportation.VehicleService.*",
+      match: "v1.products.TransportationService.*",
     },
 
-    // Matching entire namespace to a specific service endpoint
+    // Matching an entire namespace to a specific service endpoint
     {
       address: "127.0.0.1:8083",
-      match: "veterinarian.*",
+      match: "v1.employees.*",
     },
   ],
 });

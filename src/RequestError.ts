@@ -1,9 +1,5 @@
 import { Metadata, ServiceError, status } from "@grpc/grpc-js";
-import type { ProtoRequest } from "./ProtoRequest";
-
-// Shortcut reference to generic ProtoRequest type
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyProtoRequest = ProtoRequest<any, any>;
+import type { UntypedProtoRequest } from "./untyped";
 
 /**
  * Utility class to create errors for gRPC requests
@@ -30,7 +26,7 @@ export class RequestError extends Error implements ServiceError {
    * @param request ProtoRequest instance which triggered this error
    * @param details Error details (message)
    */
-  constructor(code: status, request: AnyProtoRequest, details?: string) {
+  constructor(code: status, request: UntypedProtoRequest, details?: string) {
     if (!details) {
       if (code === status.CANCELLED) {
         details = `Cancelled ${request.requestMethodType} for '${request.method}'`;

@@ -7,7 +7,6 @@ import {
   ClientUnaryCall,
   ClientWritableStream,
   Metadata,
-  MetadataValue,
   ServiceError,
   status,
   StatusObject,
@@ -15,115 +14,17 @@ import {
 import type { ProtoClient } from "./ProtoClient";
 import { RequestError } from "./RequestError";
 import { DEFAULT_RETRY_STATUS_CODES, RequestMethodType } from "./constants";
+import type {
+  RequestOptions,
+  RequestRetryOptions,
+  StreamReader,
+  StreamWriterSandbox,
+} from "./interfaces";
+import { normalizeRetryOptions } from "./util";
 
 // Shortcut types to proto functional parameters
 type VerifyArgs = Parameters<typeof Protobuf.Message.verify>;
 type CreateArgs = Parameters<typeof Protobuf.Message.create>;
-
-/**
- * Iteration callback for streamed responses
- * @param row Streamed response row
- * @param rowIndex Index for the current chunked row
- * @param request Currently active request
- */
-export type StreamReader<RequestType, ResponseType> = (
-  row: ResponseType,
-  rowIndex: number,
-  request: ProtoRequest<RequestType, ResponseType>
-) => Promise<void>;
-
-/**
- * Writing wrapper for streamed requests
- * @param write Async function for sending an object over the write stream
- * @param request Currently active request
- */
-export type StreamWriterSandbox<RequestType, ResponseType> = (
-  write: StreamWriter<RequestType>,
-  request: ProtoRequest<RequestType, ResponseType>
-) => Promise<void>;
-
-/**
- * Writing function for sending objects to the write stream
- * @param data Request data row to be streamed
- * @param encoding Write encoding for the data
- */
-export type StreamWriter<RequestType> = (
-  data: RequestType,
-  encoding?: string
-) => Promise<void>;
-
-/**
- * Custom retry logic options
- */
-export interface RequestRetryOptions {
-  /**
-   * Number of times to retry request. Defaults to none
-   */
-  retryCount?: number;
-
-  /**
-   * Status codes request is allowed to retry on
-   */
-  status?: status | status[];
-
-  /**
-   * Indicates if retry should occur after internal client timeout. Defaults to true
-   */
-  retryOnClientTimeout?: boolean;
-}
-
-/**
- * Request specific options
- */
-export interface RequestOptions {
-  /**
-   * Controller for aborting the active request
-   */
-  abortController?: AbortController;
-
-  /**
-   * Metadata to be attached to the request
-   */
-  metadata?: Record<string, MetadataValue | MetadataValue[]> | Metadata;
-
-  /**
-   * Request specific options
-   */
-  callOptions?: CallOptions;
-
-  /**
-   * Time in milliseconds before cancelling the request. Defaults to 0 for no timeout
-   */
-  timeout?: number;
-
-  /**
-   * Indicates retry logic that should be applied to the request
-   * @alias boolean Retries the request once for default status code failures when true, disable retry when false
-   * @alias number Number of retries to allow for default status code failures
-   * @alias RequestRetryOptions Custom retry options
-   */
-  retryOptions?: boolean | number | RequestRetryOptions;
-}
-
-/**
- * Normalizes provided retry options into configuration object
- * @param options Various retry option types
- */
-const normalizeRetryOptions = (
-  options: RequestOptions["retryOptions"]
-): RequestRetryOptions | void => {
-  if (options !== undefined) {
-    if (options === true) {
-      return { retryCount: 1 };
-    } else if (options === false) {
-      return { retryCount: 0 };
-    } else if (typeof options === "number") {
-      return { retryCount: options };
-    } else {
-      return options;
-    }
-  }
-};
 
 /**
  * Custom event typings
