@@ -84,7 +84,7 @@ protoClient.configureClient({ endpoint: "127.0.0.1:8080" });
 const request = await customers.Customers.GetCustomer({ name: "Github" });
 request.result; // Customer
 
-// Bidrectional Requests
+// Bidirectional Requests
 await customers.Customers.CreateCustomers(
   async (write) => {
     await write({ name: "github", action: "Github" });

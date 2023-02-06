@@ -113,7 +113,7 @@ describe("makeUnaryRequest", () => {
     ).rejects.toThrow(`id: string expected`);
   });
 
-  test("should propogate timeout errors", async () => {
+  test("should propagate timeout errors", async () => {
     RESPONSE_DELAY = 1000;
     await expect(
       makeUnaryRequest({ id: "github" }, { timeout: 100 })
@@ -134,7 +134,7 @@ describe("makeUnaryRequest", () => {
     return new Promise<void>((resolve, reject) => {
       const abortController = new AbortController();
       makeUnaryRequest({ id: "github" }, abortController)
-        .then(() => reject(new Error(`Should not have a successul return`)))
+        .then(() => reject(new Error(`Should not have a successful return`)))
         .catch(() => reject(new Error(`Should not reject`)));
 
       setTimeout(() => {
@@ -144,13 +144,13 @@ describe("makeUnaryRequest", () => {
     });
   });
 
-  test("should propogate aborted error when configured too", async () => {
+  test("should propagate aborted error when configured too", async () => {
     RESPONSE_DELAY = 1000;
     getClient().clientSettings.rejectOnAbort = true;
     return new Promise<void>((resolve, reject) => {
       const abortController = new AbortController();
       makeUnaryRequest({ id: "github" }, abortController)
-        .then(() => reject(new Error(`Should not have a successul return`)))
+        .then(() => reject(new Error(`Should not have a successful return`)))
         .catch((e) => {
           try {
             expect(e).toBeInstanceOf(RequestError);

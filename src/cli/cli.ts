@@ -335,7 +335,7 @@ export class ProtoCli {
         if (subchain.method.requestStream && subchain.method.responseStream) {
           fileContents.push(
             `/**`,
-            ` * Bidrectional Request to ${subchain.method.namespace}`,
+            ` * Bidirectional Request to ${subchain.method.namespace}`,
             ` * @param writerSandbox Async supported callback for writing data to the open stream`,
             ` * @param streamReader Iteration function that will get called on every response chunk`,
             ` * @param requestOptions Optional AbortController or request options for this specific request`,
@@ -454,7 +454,7 @@ export class ProtoCli {
         if (subchain.method.requestStream && subchain.method.responseStream) {
           fileContents.push(
             `/**`,
-            ` * Bidrectional Request to ${subchain.method.namespace}`,
+            ` * Bidirectional Request to ${subchain.method.namespace}`,
             ` * @param writerSandbox Async supported callback for writing data to the open stream`,
             ` * @param streamReader Iteration function that will get called on every response chunk`,
             ` */`,
@@ -462,7 +462,7 @@ export class ProtoCli {
           );
           fileContents.push(
             `/**`,
-            ` * Bidrectional Request to ${subchain.method.namespace}`,
+            ` * Bidirectional Request to ${subchain.method.namespace}`,
             ` * @param writerSandbox Async supported callback for writing data to the open stream`,
             ` * @param streamReader Iteration function that will get called on every response chunk`,
             ` * @param abortController Abort controller for canceling the active request`,
@@ -471,7 +471,7 @@ export class ProtoCli {
           );
           fileContents.push(
             `/**`,
-            ` * Bidrectional Request to ${subchain.method.namespace}`,
+            ` * Bidirectional Request to ${subchain.method.namespace}`,
             ` * @param writerSandbox Async supported callback for writing data to the open stream`,
             ` * @param streamReader Iteration function that will get called on every response chunk`,
             ` * @param requestOptions Request options for this specific request`,

@@ -48,7 +48,7 @@ describe("retryOptions", () => {
     });
   });
 
-  test("should propogate timeout errors after all retries are exhausted", async () => {
+  test("should propagate timeout errors after all retries are exhausted", async () => {
     RESPONSE_DELAY = 2000;
     await expect(
       makeUnaryRequest(
@@ -126,7 +126,7 @@ describe("retryOptions", () => {
     expect(activeRequest.error).toBeUndefined();
   });
 
-  test("should propogate the last service error after all retries are exhausted", async () => {
+  test("should propagate the last service error after all retries are exhausted", async () => {
     THROW_ERROR = new MockServiceError(
       status.INTERNAL,
       `Generic Service Error`

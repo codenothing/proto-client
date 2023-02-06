@@ -188,7 +188,7 @@ describe("makeServerStreamRequest", () => {
     );
   });
 
-  test("should propogate validation errors", async () => {
+  test("should propagate validation errors", async () => {
     await expect(
       makeServerStreamRequest({ name: 1234 } as never, async () => {
         throw new Error(`Should not get to streamReader`);
@@ -196,7 +196,7 @@ describe("makeServerStreamRequest", () => {
     ).rejects.toThrow(`name: string expected`);
   });
 
-  test("should propogate read processing errors", async () => {
+  test("should propagate read processing errors", async () => {
     await expect(
       makeServerStreamRequest(async () => {
         throw new Error(`Mock Read Processing Error`);
@@ -204,7 +204,7 @@ describe("makeServerStreamRequest", () => {
     ).rejects.toThrow(`Mock Read Processing Error`);
   });
 
-  test("should propogate timeout errors", async () => {
+  test("should propagate timeout errors", async () => {
     RESPONSE_DELAY = 1000;
     await expect(
       makeServerStreamRequest(
@@ -239,7 +239,7 @@ describe("makeServerStreamRequest", () => {
         },
         abortController
       )
-        .then(() => reject(new Error(`Should not have a successul return`)))
+        .then(() => reject(new Error(`Should not have a successful return`)))
         .catch(() => reject(new Error(`Should not reject`)));
 
       setTimeout(() => {
@@ -249,7 +249,7 @@ describe("makeServerStreamRequest", () => {
     });
   });
 
-  test("should propogate aborted error when configured too", async () => {
+  test("should propagate aborted error when configured too", async () => {
     RESPONSE_DELAY = 1000;
     getClient().clientSettings.rejectOnAbort = true;
     return new Promise<void>((resolve, reject) => {
@@ -261,7 +261,7 @@ describe("makeServerStreamRequest", () => {
         },
         abortController
       )
-        .then(() => reject(new Error(`Should not have a successul return`)))
+        .then(() => reject(new Error(`Should not have a successful return`)))
         .catch((e) => {
           try {
             expect(e).toBeInstanceOf(RequestError);

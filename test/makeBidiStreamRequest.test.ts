@@ -198,7 +198,7 @@ describe("makeBidiStreamRequest", () => {
     });
   });
 
-  test("should propogate write sandbox errors", async () => {
+  test("should propagate write sandbox errors", async () => {
     await expect(
       makeBidiStreamRequest(
         async () => {
@@ -212,7 +212,7 @@ describe("makeBidiStreamRequest", () => {
     ).rejects.toThrow(`Mock Write Sandbox Error`);
   });
 
-  test("should propogate invalid write data errors", async () => {
+  test("should propagate invalid write data errors", async () => {
     await expect(
       makeBidiStreamRequest(
         async (write) => {
@@ -251,7 +251,7 @@ describe("makeBidiStreamRequest", () => {
     );
   });
 
-  test("should propogate read sandbox errors", async () => {
+  test("should propagate read sandbox errors", async () => {
     await expect(
       makeBidiStreamRequest(
         async (write) => {
@@ -267,7 +267,7 @@ describe("makeBidiStreamRequest", () => {
     ).rejects.toThrow(`Mock Read Processing Error`);
   });
 
-  test("should propogate timeout errors", async () => {
+  test("should propagate timeout errors", async () => {
     RESPONSE_DELAY = 1000;
     await expect(
       makeBidiStreamRequest(
@@ -307,7 +307,7 @@ describe("makeBidiStreamRequest", () => {
         async () => undefined,
         abortController
       )
-        .then(() => reject(new Error(`Should not have a successul return`)))
+        .then(() => reject(new Error(`Should not have a successful return`)))
         .catch(() => reject(new Error(`Should not reject`)));
 
       setTimeout(() => {
@@ -317,7 +317,7 @@ describe("makeBidiStreamRequest", () => {
     });
   });
 
-  test("should propogate aborted error when configured too", async () => {
+  test("should propagate aborted error when configured too", async () => {
     RESPONSE_DELAY = 1000;
     getClient().clientSettings.rejectOnAbort = true;
     return new Promise<void>((resolve, reject) => {
@@ -329,7 +329,7 @@ describe("makeBidiStreamRequest", () => {
         async () => undefined,
         abortController
       )
-        .then(() => reject(new Error(`Should not have a successul return`)))
+        .then(() => reject(new Error(`Should not have a successful return`)))
         .catch((e) => {
           try {
             expect(e).toBeInstanceOf(RequestError);

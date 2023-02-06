@@ -149,7 +149,7 @@ describe("makeClientStreamRequest", () => {
     });
   });
 
-  test("should propogate write errors", async () => {
+  test("should propagate write errors", async () => {
     await expect(
       makeClientStreamRequest(async () => {
         await wait(50);
@@ -158,7 +158,7 @@ describe("makeClientStreamRequest", () => {
     ).rejects.toThrow(`Some Mock Write Sandbox Error`);
   });
 
-  test("should propogate invalid write data errors", async () => {
+  test("should propagate invalid write data errors", async () => {
     await expect(
       makeClientStreamRequest(async (write) => {
         await wait(50);
@@ -188,7 +188,7 @@ describe("makeClientStreamRequest", () => {
     );
   });
 
-  test("should propogate timeout errors", async () => {
+  test("should propagate timeout errors", async () => {
     RESPONSE_DELAY = 1000;
     await expect(
       makeClientStreamRequest(
@@ -227,7 +227,7 @@ describe("makeClientStreamRequest", () => {
           name: "meow",
         });
       }, abortController)
-        .then(() => reject(new Error(`Should not have a successul return`)))
+        .then(() => reject(new Error(`Should not have a successful return`)))
         .catch(() => reject(new Error(`Should not reject`)));
 
       setTimeout(() => {
@@ -237,7 +237,7 @@ describe("makeClientStreamRequest", () => {
     });
   });
 
-  test("should propogate aborted error when configured too", async () => {
+  test("should propagate aborted error when configured too", async () => {
     RESPONSE_DELAY = 1000;
     getClient().clientSettings.rejectOnAbort = true;
     return new Promise<void>((resolve, reject) => {
@@ -248,7 +248,7 @@ describe("makeClientStreamRequest", () => {
           name: "meow",
         });
       }, abortController)
-        .then(() => reject(new Error(`Should not have a successul return`)))
+        .then(() => reject(new Error(`Should not have a successful return`)))
         .catch((e) => {
           try {
             expect(e).toBeInstanceOf(RequestError);
