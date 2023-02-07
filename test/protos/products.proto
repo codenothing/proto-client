@@ -3,15 +3,15 @@ syntax = "proto3";
 package v1.products.transport;
 
 message Product {
-	string id = 1;
-	string name = 2;
+  string id = 1;
+  string name = 2;
 }
 
 message ProductRequest {
-	string id = 1;
-	string name = 2;
+  string id = 1;
+  string name = 2;
 }
 
 service TransportationService {
-	rpc GetProduct (ProductRequest) returns (Product);
+  rpc GetProduct (ProductRequest) returns (Product);
 }
