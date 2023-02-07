@@ -287,6 +287,13 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   }
 
   /**
+   * Proxy to the trailing metadata returned at the end of the response
+   */
+  public get trailingMetadata(): Metadata | undefined {
+    return this.responseStatus?.metadata;
+  }
+
+  /**
    * Sends unary (request/response) request to the service endpoint
    * @param data Data to be sent as part of the request. Defaults to empty object
    */
