@@ -321,6 +321,13 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     const stream = this.stream as ClientReadableStream<ResponseType> | null;
     return !!stream?.readable;
   }
+  
+  /**
+   * Proxy to the trailing metadata returned at the end of the response
+   */
+  public get trailingMetadata(): Metadata | undefined {
+    return this.responseStatus?.metadata;
+  }
 
   /**
    * Sends unary (request/response) request to the service endpoint
