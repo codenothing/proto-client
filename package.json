@@ -1,7 +1,7 @@
 {
   "name": "proto-client",
   "version": "0.8.0",
-  "description": "A typed gRPC Client with static code generation",
+  "description": "A simple, typed gRPC Client with static code generation",
   "author": "Corey Hart <corey@codenothing.com>",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
