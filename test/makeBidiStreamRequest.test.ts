@@ -85,11 +85,19 @@ describe("makeBidiStreamRequest", () => {
     const readCustomers: Customer[] = [];
 
     await makeBidiStreamRequest(
-      async (write) => {
+      async (write, request) => {
+        expect(request.isWritable).toStrictEqual(true);
+        expect(request.isReadable).toStrictEqual(true);
+        expect(request.isActive).toStrictEqual(true);
+
         await write(customers[0]);
         await write(customers[1]);
       },
-      async (row) => {
+      async (row, _index, request) => {
+        expect(request.isWritable).toStrictEqual(false);
+        expect(request.isReadable).toStrictEqual(true);
+        expect(request.isActive).toStrictEqual(true);
+
         readCustomers.push(row);
       }
     );

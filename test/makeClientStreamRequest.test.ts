@@ -77,7 +77,11 @@ describe("makeClientStreamRequest", () => {
   });
 
   test("should successfully request against the EditCustomer method", async () => {
-    const request = await makeClientStreamRequest(async (write) => {
+    const request = await makeClientStreamRequest(async (write, request) => {
+      expect(request.isReadable).toStrictEqual(false);
+      expect(request.isWritable).toStrictEqual(true);
+      expect(request.isActive).toStrictEqual(true);
+
       await write({
         id: "github",
         name: "Github 2000",

@@ -70,7 +70,11 @@ describe("makeServerStreamRequest", () => {
   test("should successfully request against the FindCustomers method", async () => {
     const customers: Customer[] = [];
 
-    await makeServerStreamRequest(async (row) => {
+    await makeServerStreamRequest(async (row, _index, request) => {
+      expect(request.isReadable).toStrictEqual(true);
+      expect(request.isWritable).toStrictEqual(false);
+      expect(request.isActive).toStrictEqual(true);
+
       customers.push(row);
     });
 
