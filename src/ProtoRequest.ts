@@ -21,6 +21,7 @@ import type {
   StreamWriterSandbox,
 } from "./interfaces";
 import { normalizeRetryOptions } from "./util";
+import { promisify } from "util";
 
 // Shortcut types to proto functional parameters
 type VerifyArgs = Parameters<typeof Protobuf.Message.verify>;
@@ -177,6 +178,15 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   private hasRequestBegun = false;
 
   /**
+   * Reference to the called stream from within the method
+   */
+  private stream:
+    | ClientReadableStream<ResponseType>
+    | ClientWritableStream<RequestType>
+    | ClientDuplexStream<RequestType, ResponseType>
+    | null = null;
+
+  /**
    * Internal class for managing individual requests
    */
   constructor(
@@ -287,6 +297,32 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   }
 
   /**
+   * Indicates if the request is active (started, but not finished)
+   *
+   * Note*: For middleware, this will be false until all middleware
+   * completes and the request begins
+   */
+  public get isActive(): boolean {
+    return this.hasRequestBegun && !this.error && !this.responseStatus;
+  }
+
+  /**
+   * Indicates if data can still be sent to the write stream
+   */
+  public get isWritable(): boolean {
+    const stream = this.stream as ClientWritableStream<RequestType> | null;
+    return !!stream?.writable;
+  }
+
+  /**
+   * Indicates if the data is still coming from the read stream
+   */
+  public get isReadable(): boolean {
+    const stream = this.stream as ClientReadableStream<ResponseType> | null;
+    return !!stream?.readable;
+  }
+  
+  /**
    * Proxy to the trailing metadata returned at the end of the response
    */
   public get trailingMetadata(): Metadata | undefined {
@@ -384,7 +420,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       let stream: ClientWritableStream<RequestType> | null = null;
       let finished = false;
 
-      stream = this.client
+      stream = this.stream = this.client
         .getClient(this)
         .makeClientStreamRequest<RequestType, ResponseType>(
           this.requestPath,
@@ -416,14 +452,14 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       // Cancel the open request when timeout threashold is reached
       timeout(() => {
         stream?.cancel();
-        stream = null;
+        stream = this.stream = null;
         finished = true;
       });
 
       // Listen for caller aborting of this request
       this.abortController.signal.addEventListener("abort", () => {
         stream?.cancel();
-        stream = null;
+        stream = this.stream = null;
         finished = true;
         this.error = new RequestError(status.CANCELLED, this);
 
@@ -436,7 +472,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
       // Let the caller start safely writing to the stream
       writerSandbox(async (data: RequestType, encoding?: string) => {
-        if (!stream) {
+        if (!stream || !this.isWritable) {
           throw new Error(
             `The write stream has already closed for ${this.method}`
           );
@@ -452,24 +488,15 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           );
         }
 
-        // Write message to the stream, waiting for the callback to return
-        return await new Promise<void>((writeResolve, writeReject) => {
-          if (stream) {
-            stream.write(data, encoding, () => writeResolve());
-          } else {
-            writeReject(
-              new Error(
-                `The write stream has already closed for ${this.method}`
-              )
-            );
-          }
-        });
+        // Write message to the stream, waiting for the callback
+        // to return before resolving write
+        await promisify(stream.write.bind(stream, data, encoding))();
       }, this)
         .then(() => stream?.end())
         .catch((e) => {
           if (stream) {
             stream?.cancel();
-            stream = null;
+            stream = this.stream = null;
             finished = true;
             this.error = e;
             completed(e);
@@ -518,8 +545,9 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       let counter = 0;
       let responseRowIndex = 0;
       let finished = false;
+      let stream: ClientReadableStream<ResponseType> | null;
 
-      let stream: ClientReadableStream<ResponseType> | null = this.client
+      stream = this.stream = this.client
         .getClient(this)
         .makeServerStreamRequest<RequestType, ResponseType>(
           this.requestPath,
@@ -533,14 +561,14 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       // Cancel the open request when timeout threashold is reached
       timeout(() => {
         stream?.cancel();
-        stream = null;
+        stream = this.stream = null;
       });
 
       // Let the caller start safely writing to the stream
       this.abortController.signal.addEventListener("abort", () => {
         if (stream) {
           stream.cancel();
-          stream = null;
+          stream = this.stream = null;
           this.error = new RequestError(status.CANCELLED, this);
 
           if (this.client.clientSettings.rejectOnAbort) {
@@ -575,7 +603,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           )
             .then(() => {
               if (--counter < 1 && stream && finished) {
-                stream = null;
+                stream = this.stream = null;
                 completed();
               }
             })
@@ -583,7 +611,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
             .catch((e) => {
               if (stream) {
                 stream.cancel();
-                stream = null;
+                stream = this.stream = null;
 
                 this.error = e;
                 completed(e);
@@ -598,6 +626,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
         finished = true;
 
         if (stream && counter < 1) {
+          stream = this.stream = null;
           completed();
         }
       });
@@ -605,7 +634,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       // Any service error should kill the stream
       stream.on("error", (e) => {
         if (stream) {
-          stream = null;
+          stream = this.stream = null;
           this.error = e;
           completed(e);
         }
@@ -628,29 +657,29 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       let counter = 0;
       let responseRowIndex = 0;
       let finished = false;
+      let stream: ClientDuplexStream<RequestType, ResponseType> | null;
 
-      let stream: ClientDuplexStream<RequestType, ResponseType> | null =
-        this.client
-          .getClient(this)
-          .makeBidiStreamRequest(
-            this.requestPath,
-            this.serializeRequest.bind(this),
-            this.deserializeResponse.bind(this),
-            this.metadata,
-            this.callOptions
-          );
+      stream = this.stream = this.client
+        .getClient(this)
+        .makeBidiStreamRequest(
+          this.requestPath,
+          this.serializeRequest.bind(this),
+          this.deserializeResponse.bind(this),
+          this.metadata,
+          this.callOptions
+        );
 
       // Cancel the open request when timeout threashold is reached
       timeout(() => {
         stream?.cancel();
-        stream = null;
+        stream = this.stream = null;
       });
 
       // Let the caller start safely writing to the stream
       this.abortController.signal.addEventListener("abort", () => {
         if (stream) {
           stream.cancel();
-          stream = null;
+          stream = this.stream = null;
           this.error = new RequestError(status.CANCELLED, this);
 
           if (this.client.clientSettings.rejectOnAbort) {
@@ -684,7 +713,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
         streamReader(row, responseRowIndex++, this)
           .then(() => {
             if (--counter < 1 && stream && finished) {
-              stream = null;
+              stream = this.stream = null;
               completed();
             }
           })
@@ -692,7 +721,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           .catch((e) => {
             if (stream) {
               stream.cancel();
-              stream = null;
+              stream = this.stream = null;
               this.error = e;
               completed(e);
             }
@@ -705,7 +734,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
         finished = true;
 
         if (stream && counter < 1) {
-          stream = null;
+          stream = this.stream = null;
           completed();
         }
       });
@@ -714,7 +743,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       stream.on("error", (e) => {
         if (stream) {
           stream.cancel();
-          stream = null;
+          stream = this.stream = null;
           this.error = e;
           completed(e);
         }
@@ -722,7 +751,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
       // Let the caller start safely writing to the stream
       writerSandbox(async (data: RequestType, encoding?: string) => {
-        if (!stream) {
+        if (!stream || !this.isWritable) {
           throw new Error(
             `The write stream has already closed for ${this.method}`
           );
@@ -738,24 +767,15 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           );
         }
 
-        // Write message to the stream, waiting for the callback to return
-        await new Promise<void>((writeResolve, writeReject) => {
-          if (stream) {
-            stream.write(data, encoding, () => writeResolve());
-          } else {
-            writeReject(
-              new Error(
-                `The write stream has already closed for ${this.method}`
-              )
-            );
-          }
-        });
+        // Write message to the stream, waiting for the callback
+        // to return before resolving write
+        await promisify(stream.write.bind(stream, data, encoding))();
       }, this)
         .then(() => stream?.end())
         .catch((e) => {
           if (stream) {
             stream.cancel();
-            stream = null;
+            stream = this.stream = null;
             this.error = e;
             completed(e);
           }
