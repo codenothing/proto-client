@@ -19,10 +19,16 @@ describe("ProtoRequest", () => {
     });
   });
 
-  test("should throw an error when attempting to request from a method that does not exist", async () => {
+  test("should throw an error when attempting to request from a service that does not exist", async () => {
     await expect(
       getClient().makeUnaryRequest("foo.bar.not.here", {})
-    ).rejects.toThrow(`Method foo.bar.not.here not found`);
+    ).rejects.toThrow(`no such Service 'foo.bar.not' in Root`);
+  });
+
+  test("should throw an error when attempting to request from a method that does not exist on the service", async () => {
+    await expect(
+      getClient().makeUnaryRequest("customers.Customers.NotHere", {})
+    ).rejects.toThrow(`Method NotHere not found on customers.Customers`);
   });
 
   test("should throw an error if attempting to request a method with an incorrect type", async () => {

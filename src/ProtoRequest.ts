@@ -201,12 +201,17 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     this.client = client;
     this.requestMethodType = requestMethodType;
 
+    // Break down the method to configure the path
+    const methodParts = this.method.split(/\./g);
+    const methodName = methodParts.pop();
+    const serviceName = methodParts.join(".");
+    this.requestPath = `/${serviceName}/${methodName}`;
+
     // Validate service method exists
-    const serviceMethod = this.client
-      .getRoot()
-      .lookup(this.method) as Protobuf.Method | null;
+    const service = this.client.getRoot().lookupService(serviceName);
+    const serviceMethod = service.methods[methodName as string];
     if (!serviceMethod) {
-      throw new Error(`Method ${this.method} not found`);
+      throw new Error(`Method ${methodName} not found on ${serviceName}`);
     }
 
     // Validate service method matches called function
@@ -223,12 +228,6 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
         `${requestMethodType} does not support method '${this.method}', use ${expectedMethod} instead`
       );
     }
-
-    // Break down the method to configure the path
-    const methodParts = this.method.split(/\./g);
-    const methodName = methodParts.pop();
-    const serviceName = methodParts.join(".");
-    this.requestPath = `/${serviceName}/${methodName}`;
 
     // Assign the request and response types
     this.requestType = this.client
