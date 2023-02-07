@@ -188,11 +188,11 @@ The `client.js` code generated:
 module.exports.v1 = {
   Customers: {
     GetCustomer: async (data) =>
-      protoClient.makeUnaryRequest("customers.Customers.GetCustomer", data),
+      protoClient.makeUnaryRequest("v1.Customers.GetCustomer", data),
 
     CreateCustomers: async (writerSandbox, streamReader) =>
       protoClient.CreateCustomers(
-        "customers.Customers.CreateCustomers",
+        "v1.Customers.CreateCustomers",
         writerSandbox,
         streamReader
       ),
