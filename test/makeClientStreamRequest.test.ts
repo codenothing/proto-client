@@ -93,6 +93,10 @@ describe("makeClientStreamRequest", () => {
       });
     });
 
+    expect(request.isReadable).toStrictEqual(false);
+    expect(request.isWritable).toStrictEqual(false);
+    expect(request.isActive).toStrictEqual(false);
+
     expect(request.result).toEqual({
       customers: [
         {
