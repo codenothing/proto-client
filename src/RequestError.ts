@@ -7,24 +7,30 @@ import type { UntypedProtoRequest } from "./untyped";
 export class RequestError extends Error implements ServiceError {
   /**
    * Error status code
+   * @type {status}
+   * @readonly
    */
-  public code: status;
+  public readonly code: status;
 
   /**
    * Error details
+   * @type {string}
+   * @readonly
    */
-  public details: string;
+  public readonly details: string;
 
   /**
    * Request metadata
+   * @type {Metadata}
+   * @readonly
    */
-  public metadata: Metadata;
+  public readonly metadata: Metadata;
 
   /**
    * Creates custom error for gRPC requests
-   * @param code Status code representing the error
-   * @param request ProtoRequest instance which triggered this error
-   * @param details Error details (message)
+   * @param {status} code Status code representing the error
+   * @param {ProtoRequest} request ProtoRequest instance which triggered this error
+   * @param {string} [details] Error details (message)
    */
   constructor(code: status, request: UntypedProtoRequest, details?: string) {
     if (!details) {

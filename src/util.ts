@@ -6,8 +6,10 @@ import type {
 
 /**
  * Generates a function for matching namespaces to requests
- * @param match Multi-type endpoint matcher to convert
+ * @param {string | RegExp | EndpointMatcher} match Multi-type endpoint matcher to convert
  * @returns Matcher function
+ * @private
+ * @package
  */
 export const generateEndpointMatcher = (
   match?: string | RegExp | EndpointMatcher
@@ -30,7 +32,10 @@ export const generateEndpointMatcher = (
 
 /**
  * Normalizes provided retry options into configuration object
- * @param options Various retry option types
+ * @param {boolean | number | RequestRetryOptions} options Various retry option types
+ * @returns {RequestRetryOptions | undefined} Normalized retry options if they are passed in
+ * @private
+ * @package
  */
 export const normalizeRetryOptions = (
   options: RequestOptions["retryOptions"]

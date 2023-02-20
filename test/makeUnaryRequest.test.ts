@@ -1,18 +1,18 @@
 import { ServerUnaryCall, sendUnaryData, status } from "@grpc/grpc-js";
-import { RequestError, ProtoRequest } from "../src";
 import {
   Customer,
   getClient,
   GetCustomerRequest,
+  getUnaryRequest,
   makeUnaryRequest,
   startServer,
+  wait,
 } from "./utils";
 import { MockServiceError } from "./MockServiceError";
 
 describe("makeUnaryRequest", () => {
   let RESPONSE_DELAY: number;
   let THROW_ERROR_RESPONSE: boolean;
-  let activeRequest: ProtoRequest<GetCustomerRequest, Customer>;
 
   beforeEach(async () => {
     THROW_ERROR_RESPONSE = false;
@@ -29,7 +29,7 @@ describe("makeUnaryRequest", () => {
       (customer) => (CUSTOMERS_HASH[customer.id as string] = customer)
     );
 
-    const { client } = await startServer({
+    await startServer({
       GetCustomer: (
         call: ServerUnaryCall<GetCustomerRequest, Customer>,
         callback: sendUnaryData<Customer>
@@ -56,10 +56,6 @@ describe("makeUnaryRequest", () => {
         }
       },
     });
-
-    client.useMiddleware(async (req) => {
-      activeRequest = req;
-    });
   });
 
   test("should successfully request against the GetCustomer method", async () => {
@@ -84,61 +80,65 @@ describe("makeUnaryRequest", () => {
 
   test("should ignore first try failure if the retry is successful", async () => {
     RESPONSE_DELAY = 1000;
-    return new Promise<void>((resolve, reject) => {
-      makeUnaryRequest({ id: "github" }, { timeout: 200, retryOptions: true })
-        .then((request) => {
-          try {
-            expect(request.result).toEqual({
-              id: "github",
-              name: "Github",
-            });
-            expect(request.error).toBeUndefined();
-            expect(request.responseErrors).toEqual([
-              expect.objectContaining({ code: status.DEADLINE_EXCEEDED }),
-            ]);
-            resolve();
-          } catch (e) {
-            reject(e);
-          }
-        })
-        .catch(reject);
+    const request = getUnaryRequest(
+      { id: "github" },
+      { timeout: 200, retryOptions: true }
+    );
 
-      setTimeout(() => (RESPONSE_DELAY = 0), 100);
+    await wait(100);
+    RESPONSE_DELAY = 0;
+
+    await request.waitForEnd();
+    expect(request.result).toEqual({
+      id: "github",
+      name: "Github",
     });
+    expect(request.error).toBeUndefined();
+    expect(request.responseErrors).toEqual([
+      expect.objectContaining({ code: status.DEADLINE_EXCEEDED }),
+    ]);
   });
 
   test("should throw when passing invalid data", async () => {
-    await expect(
-      makeUnaryRequest({ id: 1234 } as never, { timeout: 100 })
-    ).rejects.toThrow(`id: string expected`);
+    const { error } = await makeUnaryRequest({ id: 1234 } as never, {
+      timeout: 100,
+    });
+
+    expect(error?.message).toStrictEqual(`id: string expected`);
   });
 
   test("should propagate timeout errors", async () => {
     RESPONSE_DELAY = 1000;
-    await expect(
-      makeUnaryRequest({ id: "github" }, { timeout: 100 })
-    ).rejects.toThrow(
+    const { error } = await makeUnaryRequest(
+      { id: "github" },
+      { timeout: 100 }
+    );
+
+    expect(error?.message).toStrictEqual(
       `makeUnaryRequest for 'customers.Customers.GetCustomer' timed out`
     );
   });
 
   test("should handle service errors", async () => {
     THROW_ERROR_RESPONSE = true;
-    await expect(makeUnaryRequest({ id: "github" })).rejects.toThrow(
-      `13 INTERNAL: Generic Service Error`
-    );
+    const { error } = await makeUnaryRequest({ id: "github" });
+
+    expect(error?.message).toStrictEqual(`13 INTERNAL: Generic Service Error`);
   });
 
   test("should ignore aborted requests", async () => {
     RESPONSE_DELAY = 1000;
+    const abortController = new AbortController();
+    const request = getUnaryRequest({ id: "github" }, abortController);
+
     return new Promise<void>((resolve, reject) => {
-      const abortController = new AbortController();
-      makeUnaryRequest({ id: "github" }, abortController)
+      request
+        .waitForEnd()
         .then(() => reject(new Error(`Should not have a successful return`)))
         .catch(() => reject(new Error(`Should not reject`)));
 
       setTimeout(() => {
-        activeRequest.on("aborted", () => resolve());
+        request.on("aborted", () => resolve());
         abortController.abort();
       }, 100);
     });
@@ -147,23 +147,15 @@ describe("makeUnaryRequest", () => {
   test("should propagate aborted error when configured too", async () => {
     RESPONSE_DELAY = 1000;
     getClient().clientSettings.rejectOnAbort = true;
-    return new Promise<void>((resolve, reject) => {
-      const abortController = new AbortController();
-      makeUnaryRequest({ id: "github" }, abortController)
-        .then(() => reject(new Error(`Should not have a successful return`)))
-        .catch((e) => {
-          try {
-            expect(e).toBeInstanceOf(RequestError);
-            expect((e as RequestError).details).toStrictEqual(
-              `Cancelled makeUnaryRequest for 'customers.Customers.GetCustomer'`
-            );
-            resolve();
-          } catch (matchError) {
-            reject(matchError);
-          }
-        });
 
-      setTimeout(() => abortController.abort(), 100);
-    });
+    const abortController = new AbortController();
+    const request = getUnaryRequest({ id: "github" }, abortController);
+
+    await wait(100);
+    abortController.abort();
+
+    await expect(request.waitForEnd()).rejects.toThrow(
+      `Cancelled makeUnaryRequest for 'customers.Customers.GetCustomer'`
+    );
   });
 });

@@ -20,12 +20,12 @@ describe("RequestError", () => {
       },
     });
 
-    request = new ProtoRequest<GetCustomerRequest, Customer>(
+    request = new ProtoRequest<GetCustomerRequest, Customer>({
       client,
-      "customers.Customers.GetCustomer",
-      RequestMethodType.UnaryRequest,
-      undefined
-    );
+      method: "customers.Customers.GetCustomer",
+      requestMethodType: RequestMethodType.UnaryRequest,
+      blockAutoStart: true,
+    });
   });
 
   test("should assign parameters and auto set code to aborted", () => {

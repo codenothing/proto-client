@@ -24,7 +24,7 @@ describe("Cli", () => {
       `--keep-case`,
       ...PROTO_FILE_PATHS,
     ]);
-    cli.protoPackagePath = `${__dirname}/../src`;
+    cli.protoPackagePath = `../../src`;
     await cli.run();
   });
 

@@ -150,12 +150,14 @@ describe("metadata", () => {
     });
 
     test("should fail the request if auth token is invalid in metadata", async () => {
-      await expect(
-        makeUnaryRequest(
-          { id: "github" },
-          { metadata: { auth_token: "barbaz" } }
-        )
-      ).rejects.toThrow(`Missing auth_token metadata`);
+      const { error } = await makeUnaryRequest(
+        { id: "github" },
+        { metadata: { auth_token: "barbaz" } }
+      );
+
+      expect(error?.message).toStrictEqual(
+        `13 INTERNAL: Missing auth_token metadata`
+      );
     });
   });
 
@@ -206,15 +208,17 @@ describe("metadata", () => {
     });
 
     test("should fail the request if auth token is invalid in metadata", async () => {
-      await expect(
-        makeClientStreamRequest(
-          async (write) => {
-            await write({ id: "github", name: "Github" });
-            await write({ id: "npm", name: "NPM" });
-          },
-          { metadata: { auth_token: "barbaz" } }
-        )
-      ).rejects.toThrow(`Missing auth_token metadata`);
+      const { error } = await makeClientStreamRequest(
+        async (write) => {
+          await write({ id: "github", name: "Github" });
+          await write({ id: "npm", name: "NPM" });
+        },
+        { metadata: { auth_token: "barbaz" } }
+      );
+
+      expect(error?.message).toStrictEqual(
+        `13 INTERNAL: Missing auth_token metadata`
+      );
     });
   });
 
@@ -260,11 +264,17 @@ describe("metadata", () => {
     });
 
     test("should fail the request if auth token is invalid in metadata", async () => {
-      await expect(
-        makeServerStreamRequest({}, async () => undefined, {
+      const { error } = await makeServerStreamRequest(
+        {},
+        async () => undefined,
+        {
           metadata: { auth_token: "barbaz" },
-        })
-      ).rejects.toThrow(`Missing auth_token metadata`);
+        }
+      );
+
+      expect(error?.message).toStrictEqual(
+        `13 INTERNAL: Missing auth_token metadata`
+      );
     });
   });
 
@@ -322,18 +332,20 @@ describe("metadata", () => {
     });
 
     test("should fail the request if auth token is invalid in metadata", async () => {
-      await expect(
-        makeBidiStreamRequest(
-          async (write) => {
-            await write({ id: "github", name: "Github" });
-            await write({ id: "npm", name: "NPM" });
-          },
-          async () => undefined,
-          {
-            metadata: { auth_token: "barbaz" },
-          }
-        )
-      ).rejects.toThrow(`Missing auth_token metadata`);
+      const { error } = await makeBidiStreamRequest(
+        async (write) => {
+          await write({ id: "github", name: "Github" });
+          await write({ id: "npm", name: "NPM" });
+        },
+        async () => undefined,
+        {
+          metadata: { auth_token: "barbaz" },
+        }
+      );
+
+      expect(error?.message).toStrictEqual(
+        `13 INTERNAL: Missing auth_token metadata`
+      );
     });
   });
 });

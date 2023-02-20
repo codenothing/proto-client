@@ -2,8 +2,10 @@ import { status } from "@grpc/grpc-js";
 
 /**
  * Supported gRPC request types
+ * @enum {string}
+ * @readonly
  */
-export const enum RequestMethodType {
+export enum RequestMethodType {
   UnaryRequest = "makeUnaryRequest",
   ClientStreamRequest = "makeClientStreamRequest",
   ServerStreamRequest = "makeServerStreamRequest",
@@ -12,6 +14,7 @@ export const enum RequestMethodType {
 
 /**
  * Default list of status that can be retried
+ * @type {status[]}
  */
 export const DEFAULT_RETRY_STATUS_CODES: status[] = [
   status.CANCELLED,

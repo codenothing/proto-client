@@ -4,7 +4,7 @@ import color from "cli-color";
 import { hideBin } from "yargs/helpers";
 import { promises } from "fs";
 import { promisify } from "util";
-import { FileBuilder } from "./FileBuilder";
+import { AddMethodsParams, FileBuilder } from "./FileBuilder";
 
 interface Method {
   requestType: string;
@@ -15,10 +15,9 @@ interface Method {
 
 interface ServiceMethodChain {
   [key: string]: {
+    namespace: string;
+    methods: Record<string, Method & { namespace: string }>;
     nested: ServiceMethodChain;
-    method?: Method & {
-      namespace: string;
-    };
   };
 }
 
@@ -31,6 +30,11 @@ interface RawProtos {
   };
 }
 
+/**
+ * Cli runner to building typed endpoints for protos defined
+ * @private
+ * @package
+ */
 export class ProtoCli {
   public protoPackagePath = "proto-client";
   public protoFiles: string[] = [];
@@ -100,7 +104,7 @@ export class ProtoCli {
     process.exit(1);
   }
 
-  // Logging filename with checkmark
+  // Logging filename with check mark
   public logFileWritten(filename: string) {
     console.log(color.green(`✔ ${filename}`));
   }
@@ -251,44 +255,55 @@ export class ProtoCli {
     }
 
     for (const key in rawProto.nested) {
-      const subproto = rawProto.nested[key];
+      const subProto = rawProto.nested[key];
 
-      if (subproto.methods) {
+      if (subProto.methods) {
+        // Prefill the service chain
         let serviceMethodChain = this.serviceMethodChain;
-        [...chain, key].forEach((name) => {
-          serviceMethodChain[name] = serviceMethodChain[name] || { nested: {} };
+        chain.forEach((name) => {
+          serviceMethodChain[name] = serviceMethodChain[name] || {
+            nested: {},
+            methods: {},
+            namespace: "",
+          };
           serviceMethodChain = serviceMethodChain[name].nested;
         });
 
-        for (const name in subproto.methods) {
-          const method = subproto.methods[name];
-          serviceMethodChain[name] = {
-            method: {
-              requestType:
-                subproto.nested && subproto.nested[method.requestType]
-                  ? `${[...chain, key].join(".")}.I${method.requestType}`
-                  : `${chain.join(".")}.I${method.requestType}`,
-              responseType:
-                subproto.nested && subproto.nested[method.responseType]
-                  ? `${[...chain, key].join(".")}.I${method.responseType}`
-                  : `${chain.join(".")}.I${method.responseType}`,
-              requestStream: method.requestStream,
-              responseStream: method.responseStream,
-              namespace: [...chain, key, name].join("."),
-            },
-            nested: {},
+        // Default the current service chain
+        const service = serviceMethodChain[key] || {
+          nested: {},
+          methods: {},
+          namespace: [...chain, key].join("."),
+        };
+        serviceMethodChain[key] = service;
+
+        // Attach request methods
+        for (const name in subProto.methods) {
+          const method = subProto.methods[name];
+          service.methods[name] = {
+            requestType:
+              subProto.nested && subProto.nested[method.requestType]
+                ? `${[...chain, key].join(".")}.I${method.requestType}`
+                : `${chain.join(".")}.I${method.requestType}`,
+            responseType:
+              subProto.nested && subProto.nested[method.responseType]
+                ? `${[...chain, key].join(".")}.I${method.responseType}`
+                : `${chain.join(".")}.I${method.responseType}`,
+            requestStream: method.requestStream,
+            responseStream: method.responseStream,
+            namespace: [...chain, key, name].join("."),
           };
         }
       }
 
-      this.compileServiceMethods(subproto, [...chain, key]);
+      this.compileServiceMethods(subProto, [...chain, key]);
     }
   }
 
   // Builds out client JS shortcuts
   public async writeClientJs() {
-    const fileContents = new FileBuilder(`${this.outputDirectory}/client.js`);
-    fileContents.push(
+    const builder = new FileBuilder(`${this.outputDirectory}/client.js`);
+    builder.push(
       `const { ProtoClient } = require("${this.protoPackagePath}");`,
       ``,
       `/**`,
@@ -307,109 +322,182 @@ export class ProtoCli {
       `});`
     );
 
-    for (const name in this.serviceMethodChain) {
-      fileContents.newline();
-      fileContents.push(`module.exports.${name} = {`);
-      fileContents.indent();
-      this.clientJsMethodChain(
-        this.serviceMethodChain[name].nested,
-        fileContents
+    for (const chainName in this.serviceMethodChain) {
+      builder.newline();
+      builder.push(
+        `/**`,
+        ` * ${chainName} Package`,
+        ` * @namespace ${chainName}`,
+        ` */`,
+        `module.exports.${chainName} = {`
       );
-      fileContents.deindent();
-      fileContents.push(`};`);
+      builder.indent();
+      this.clientJsMethodChain(
+        this.serviceMethodChain[chainName].nested,
+        builder
+      );
+      builder.deindent();
+      builder.push(`};`);
     }
 
-    await fileContents.write();
+    await builder.write();
   }
 
   // Nested looping to build namespaces and service methods
   public clientJsMethodChain(
     serviceChain: ServiceMethodChain,
-    fileContents: FileBuilder
+    builder: FileBuilder
   ) {
-    for (const name in serviceChain) {
-      const subchain = serviceChain[name];
+    for (const [chainName, subChain] of Object.entries(serviceChain)) {
+      // Chain entry is a service
+      if (Object.keys(subChain.methods).length) {
+        builder.push(
+          `/**`,
+          ` * ${chainName} Service`,
+          ` * @namespace ${chainName}`,
+          ` */`,
+          `${chainName}: {`
+        );
+        builder.indent();
 
-      if (subchain.method) {
-        // Bidirectional
-        if (subchain.method.requestStream && subchain.method.responseStream) {
-          fileContents.push(
+        // Attach all methods
+        for (const [methodName, method] of Object.entries(subChain.methods)) {
+          const reqResType = `${method.requestType}, ${method.responseType}`;
+          const returnType = `ProtoRequest<${reqResType}>`;
+
+          // Open method wrapper
+          builder.push(
             `/**`,
-            ` * Bidirectional Request to ${subchain.method.namespace}`,
-            ` * @param writerSandbox Async supported callback for writing data to the open stream`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
-            ` * @param requestOptions Optional AbortController or request options for this specific request`,
+            ` * Request generation for ${methodName}`,
             ` */`,
-            `${name}: async (writerSandbox, streamReader, requestOptions) =>`
+            `${methodName}: (() => {`
           );
-          fileContents.pushWithIndent(
-            `protoClient.makeBidiStreamRequest("${subchain.method.namespace}", writerSandbox, streamReader, requestOptions),`
-          );
+
+          // Bidirectional
+          if (method.requestStream && method.responseStream) {
+            builder.pushWithIndent(
+              `/**`,
+              ` * Bidirectional Request to ${method.namespace}`,
+              ` * @param {StreamWriterSandbox<${method.requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
+              ` * @param {StreamReader<${method.responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
+              ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
+              ` * @returns {Promise<${returnType}>} Request instance`,
+              ` */`,
+              `const ${methodName} = async (writerSandbox, streamReader, requestOptions) =>`,
+              `${builder.indentCharacter}protoClient.makeBidiStreamRequest("${method.namespace}", writerSandbox, streamReader, requestOptions);`,
+              `/**`,
+              ` * Triggers bidirectional request to ${method.namespace}, returning the ProtoRequest instance`,
+              ` * @param {StreamWriterSandbox<${method.requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
+              ` * @param {StreamReader<${method.responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
+              ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
+              ` * @returns {${returnType}} Request instance`,
+              ` */`,
+              `${methodName}.get = (writerSandbox, streamReader, requestOptions) =>`,
+              `${builder.indentCharacter}protoClient.getBidiStreamRequest("${method.namespace}", writerSandbox, streamReader, requestOptions);`,
+              `return ${methodName};`
+            );
+          }
+          // Server Stream
+          else if (method.responseStream) {
+            builder.pushWithIndent(
+              `/**`,
+              ` * Server Stream Request to ${method.namespace}`,
+              ` * @param {${method.requestType} | StreamReader<${method.responseType}>} [data] Optional data to be sent as part of the request`,
+              ` * @param {StreamReader<${method.responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
+              ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
+              ` * @returns {Promise<${returnType}>} Request instance`,
+              ` */`,
+              `const ${methodName} = async (data, streamReader, requestOptions) =>`,
+              `${builder.indentCharacter}protoClient.makeServerStreamRequest("${method.namespace}", data, streamReader, requestOptions);`,
+              `/**`,
+              ` * Triggers server stream request to ${method.namespace}, returning the ProtoRequest instance`,
+              ` * @param {${method.requestType} | StreamReader<${method.responseType}>} [data] Optional data to be sent as part of the request`,
+              ` * @param {StreamReader<${method.responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
+              ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
+              ` * @returns {${returnType}} Request instance`,
+              ` */`,
+              `${methodName}.get = (data, streamReader, requestOptions) =>`,
+              `${builder.indentCharacter}protoClient.getServerStreamRequest("${method.namespace}", data, streamReader, requestOptions);`,
+              `return ${methodName};`
+            );
+          }
+          // Server Stream
+          else if (method.requestStream) {
+            builder.pushWithIndent(
+              `/**`,
+              ` * Client Stream Request to ${method.namespace}`,
+              ` * @param {StreamWriterSandbox<${method.requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
+              ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
+              ` * @returns {Promise<${returnType}>} Request instance`,
+              ` */`,
+              `const ${methodName} = async (writerSandbox, requestOptions) =>`,
+              `${builder.indentCharacter}protoClient.makeClientStreamRequest("${method.namespace}", writerSandbox, requestOptions);`,
+              `/**`,
+              ` * Triggers client stream request to ${method.namespace}, returning the ProtoRequest instance`,
+              ` * @param {StreamWriterSandbox<${method.requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
+              ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
+              ` * @returns {${returnType}} Request instance`,
+              ` */`,
+              `${methodName}.get = (writerSandbox, requestOptions) =>`,
+              `${builder.indentCharacter}protoClient.getClientStreamRequest("${method.namespace}", writerSandbox, requestOptions);`,
+              `return ${methodName};`
+            );
+          }
+          // Unary Request
+          else {
+            builder.pushWithIndent(
+              `/**`,
+              ` * Unary Request to ${method.namespace}`,
+              ` * @param {${method.requestType} | null} [data] Optional Data to be sent as part of the request. Defaults to empty object`,
+              ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
+              ` * @returns {Promise<${returnType}>} Request instance`,
+              ` */`,
+              `const ${methodName} = async (data, requestOptions) =>`,
+              `${builder.indentCharacter}protoClient.makeUnaryRequest("${method.namespace}", data, requestOptions);`,
+              `/**`,
+              ` * Triggers unary request to ${method.namespace}, returning the ProtoRequest instance`,
+              ` * @param {${method.requestType} | null} [data] Optional Data to be sent as part of the request. Defaults to empty object`,
+              ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
+              ` * @returns {${returnType}} Request instance`,
+              ` */`,
+              `${methodName}.get = (data, requestOptions) =>`,
+              `${builder.indentCharacter}protoClient.getUnaryRequest("${method.namespace}", data, requestOptions);`,
+              `return ${methodName};`
+            );
+          }
+
+          // Close out the method wrapper
+          builder.push(`})(),`);
         }
-        // Server Stream
-        else if (subchain.method.responseStream) {
-          fileContents.push(
-            `/**`,
-            ` * Server Stream Request to ${subchain.method.namespace}`,
-            ` * @param data Data to be sent as part of the request`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
-            ` * @param requestOptions Optional AbortController or request options for this specific request`,
-            ` */`,
-            `${name}: async (data, streamReader, requestOptions) =>`
-          );
-          fileContents.pushWithIndent(
-            `protoClient.makeServerStreamRequest("${subchain.method.namespace}", data, streamReader, requestOptions),`
-          );
-        }
-        // Server Stream
-        else if (subchain.method.requestStream) {
-          fileContents.push(
-            `/**`,
-            ` * Client Stream Request to ${subchain.method.namespace}`,
-            ` * @param writerSandbox Async supported callback for writing data to the open stream`,
-            ` * @param requestOptions Optional AbortController or request options for this specific request`,
-            ` */`,
-            `${name}: async (writerSandbox, requestOptions) =>`
-          );
-          fileContents.pushWithIndent(
-            `protoClient.makeClientStreamRequest("${subchain.method.namespace}", writerSandbox, requestOptions),`
-          );
-        }
-        // Unary Request
-        else {
-          fileContents.push(
-            `/**`,
-            ` * Unary Request to ${subchain.method.namespace}`,
-            ` * @param data Data to be sent as part of the request`,
-            ` * @param requestOptions Optional AbortController or request options for this specific request`,
-            ` */`,
-            `${name}: async (data, requestOptions) =>`
-          );
-          fileContents.pushWithIndent(
-            `protoClient.makeUnaryRequest("${subchain.method.namespace}", data, requestOptions),`
-          );
-        }
+
+        // Close out service
+        builder.deindent();
+        builder.push(`},`);
       }
-    }
-
-    for (const name in serviceChain) {
-      if (Object.keys(serviceChain[name].nested).length) {
-        fileContents.newline();
-        fileContents.push(`${name}: {`);
-        fileContents.indent();
-        this.clientJsMethodChain(serviceChain[name].nested, fileContents);
-        fileContents.deindent();
-        fileContents.push(`},`);
+      // Keep digging
+      else if (Object.keys(subChain.nested).length) {
+        builder.push(
+          `/**`,
+          ` * ${chainName} Package`,
+          ` * @namespace ${chainName}`,
+          ` */`,
+          `${chainName}: {`
+        );
+        builder.indent();
+        this.clientJsMethodChain(subChain.nested, builder);
+        builder.deindent();
+        builder.push(`},`);
       }
     }
   }
 
   // Writing types for client shortcuts
   public async writeClientTypes() {
-    const fileContents = new FileBuilder(`${this.outputDirectory}/client.d.ts`);
+    const builder = new FileBuilder(`${this.outputDirectory}/client.d.ts`);
 
-    fileContents.push(
+    builder.push(
       `import { ProtoClient, ProtoRequest, RequestOptions, StreamWriterSandbox, StreamReader } from "${this.protoPackagePath}";`,
+      `import { Readable , EventEmitter } from "stream";`,
       `import protos from "./protos";`,
       ``,
       `/**`,
@@ -418,172 +506,185 @@ export class ProtoCli {
       `export const protoClient: ProtoClient;`
     );
 
-    for (const name in this.serviceMethodChain) {
-      fileContents.newline();
-      fileContents.push(
-        `/** Namespace ${name} */`,
-        `export namespace ${name} {`
+    for (const chainName in this.serviceMethodChain) {
+      builder.newline();
+      builder.push(
+        `/**`,
+        ` * ${chainName} Package`,
+        ` * @namespace ${chainName}`,
+        ` */`,
+        `export namespace ${chainName} {`
       );
-      fileContents.indent();
+      builder.indent();
       this.clientTypesMethodChain(
-        this.serviceMethodChain[name].nested,
-        fileContents
+        this.serviceMethodChain[chainName].nested,
+        builder
       );
-      fileContents.deindent();
-      fileContents.push(`}`);
+      builder.deindent();
+      builder.push(`}`);
     }
 
-    await fileContents.write();
+    await builder.write();
   }
 
   // Builds nested namespaces and service method typings
   public clientTypesMethodChain(
     serviceChain: ServiceMethodChain,
-    fileContents: FileBuilder
+    builder: FileBuilder
   ) {
-    for (const name in serviceChain) {
-      const subchain = serviceChain[name];
+    for (const [chainName, subChain] of Object.entries(serviceChain)) {
+      // Chain entry is a service
+      if (Object.keys(subChain.methods).length) {
+        builder.push(
+          `/**`,
+          ` * ${chainName} Service`,
+          ` * @namespace ${chainName}`,
+          ` */`,
+          `namespace ${chainName} {`
+        );
+        builder.indent();
 
-      if (subchain.method) {
-        const requestType = `protos.${subchain.method.requestType}`;
-        const responseType = `protos.${subchain.method.responseType}`;
-        const reqResType = `${requestType}, ${responseType}`;
-        const returnType = `Promise<ProtoRequest<${reqResType}>>`;
+        // Attach all methods
+        for (const [methodName, method] of Object.entries(subChain.methods)) {
+          const requestType = `protos.${method.requestType}`;
+          const responseType = `protos.${method.responseType}`;
+          const reqResType = `${requestType}, ${responseType}`;
+          const returnType = `ProtoRequest<${reqResType}>`;
 
-        // Bidirectional
-        if (subchain.method.requestStream && subchain.method.responseStream) {
-          fileContents.push(
+          const args: AddMethodsParams["args"] = {
+            data: {
+              type: `${requestType} | null`,
+              shortType: `${requestType} | null`,
+              desc: `Data to be sent as part of the request`,
+            },
+            writerSandbox: {
+              type: `StreamWriterSandbox<${reqResType}>`,
+              shortType: `StreamWriterSandbox`,
+              desc: `Async supported callback for writing data to the open stream`,
+            },
+            stream: {
+              type: `Readable | EventEmitter`,
+              shortType: `Readable | EventEmitter`,
+              desc: `Readable like stream for piping into the request stream`,
+            },
+            streamReader: {
+              type: `StreamReader<${reqResType}>`,
+              shortType: `StreamReader`,
+              desc: `Iteration function that will be called on every response chunk`,
+            },
+            abortController: {
+              type: `AbortController`,
+              shortType: `AbortController`,
+              desc: `Data to be sent as part of the request`,
+            },
+            requestOptions: {
+              type: `RequestOptions`,
+              shortType: `RequestOptions`,
+              desc: `Request options for this specific request`,
+            },
+          };
+
+          builder.push(
             `/**`,
-            ` * Bidirectional Request to ${subchain.method.namespace}`,
-            ` * @param writerSandbox Async supported callback for writing data to the open stream`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
+            ` * Request generation for ${method.namespace}`,
             ` */`,
-            `function ${name}(writerSandbox: StreamWriterSandbox<${reqResType}>, streamReader: StreamReader<${reqResType}>): ${returnType}`
+            `const ${methodName}: {`
           );
-          fileContents.push(
-            `/**`,
-            ` * Bidirectional Request to ${subchain.method.namespace}`,
-            ` * @param writerSandbox Async supported callback for writing data to the open stream`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
-            ` * @param abortController Abort controller for canceling the active request`,
-            ` */`,
-            `function ${name}(writerSandbox: StreamWriterSandbox<${reqResType}>, streamReader: StreamReader<${reqResType}>, abortController: AbortController): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Bidirectional Request to ${subchain.method.namespace}`,
-            ` * @param writerSandbox Async supported callback for writing data to the open stream`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
-            ` * @param requestOptions Request options for this specific request`,
-            ` */`,
-            `function ${name}(writerSandbox: StreamWriterSandbox<${reqResType}>, streamReader: StreamReader<${reqResType}>, requestOptions: RequestOptions): ${returnType}`
-          );
+          builder.indent();
+
+          // Bidirectional
+          if (method.requestStream && method.responseStream) {
+            builder.addTypedMethods({
+              methodType: `Bidirectional Stream`,
+              namespace: method.namespace,
+              returnType,
+              args,
+              combos: [
+                [],
+                ["writerSandbox"],
+                ["writerSandbox", "streamReader"],
+                ["writerSandbox", "streamReader", "abortController"],
+                ["writerSandbox", "streamReader", "requestOptions"],
+                ["stream"],
+                ["stream", "streamReader"],
+                ["stream", "streamReader", "abortController"],
+                ["stream", "streamReader", "requestOptions"],
+              ],
+            });
+          }
+          // Server Stream
+          else if (method.responseStream) {
+            builder.addTypedMethods({
+              methodType: `Server Stream`,
+              namespace: method.namespace,
+              returnType,
+              args,
+              combos: [
+                [],
+                ["streamReader"],
+                ["data"],
+                ["data", "streamReader"],
+                ["data", "streamReader", "abortController"],
+                ["data", "streamReader", "requestOptions"],
+              ],
+            });
+          }
+          // Server Stream
+          else if (method.requestStream) {
+            builder.addTypedMethods({
+              methodType: `Client Stream`,
+              namespace: method.namespace,
+              returnType,
+              args,
+              combos: [
+                [],
+                ["writerSandbox"],
+                ["writerSandbox", "abortController"],
+                ["writerSandbox", "requestOptions"],
+                ["stream"],
+                ["stream", "abortController"],
+                ["stream", "requestOptions"],
+              ],
+            });
+          }
+          // Unary Request
+          else {
+            builder.addTypedMethods({
+              methodType: `Unary`,
+              namespace: method.namespace,
+              returnType,
+              args,
+              combos: [
+                [],
+                ["data"],
+                ["data", "abortController"],
+                ["data", "requestOptions"],
+              ],
+            });
+          }
+
+          // Close of method interface
+          builder.deindent();
+          builder.push(`}`);
         }
-        // Server Stream
-        else if (subchain.method.responseStream) {
-          fileContents.push(
-            `/**`,
-            ` * Server Stream Request to ${subchain.method.namespace}`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
-            ` */`,
-            `function ${name}(streamReader: StreamReader<${reqResType}>): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Server Stream Request to ${subchain.method.namespace}`,
-            ` * @param data Data to be sent as part of the request`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
-            ` */`,
-            `function ${name}(data: ${requestType}, streamReader: StreamReader<${reqResType}>): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Server Stream Request to ${subchain.method.namespace}`,
-            ` * @param data Data to be sent as part of the request`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
-            ` * @param abortController Abort controller for canceling the active request`,
-            ` */`,
-            `function ${name}(data: ${requestType}, streamReader: StreamReader<${reqResType}>, abortController: AbortController): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Server Stream Request to ${subchain.method.namespace}`,
-            ` * @param data Data to be sent as part of the request`,
-            ` * @param streamReader Iteration function that will get called on every response chunk`,
-            ` * @param requestOptions Request options for this specific request`,
-            ` */`,
-            `function ${name}(data: ${requestType}, streamReader: StreamReader<${reqResType}>, requestOptions: RequestOptions): ${returnType}`
-          );
-        }
-        // Server Stream
-        else if (subchain.method.requestStream) {
-          fileContents.push(
-            `/**`,
-            ` * Client Stream Request to ${subchain.method.namespace}`,
-            ` * @param writerSandbox Async supported callback for writing data to the open stream`,
-            ` */`,
-            `function ${name}(writerSandbox: StreamWriterSandbox<${reqResType}>): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Client Stream Request to ${subchain.method.namespace}`,
-            ` * @param writerSandbox Async supported callback for writing data to the open stream`,
-            ` * @param abortController Abort controller for canceling the active request`,
-            ` */`,
-            `function ${name}(writerSandbox: StreamWriterSandbox<${reqResType}>, abortController: AbortController): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Client Stream Request to ${subchain.method.namespace}`,
-            ` * @param writerSandbox Async supported callback for writing data to the open stream`,
-            ` * @param requestOptions Request options for this specific request`,
-            ` */`,
-            `function ${name}(writerSandbox: StreamWriterSandbox<${reqResType}>, requestOptions: RequestOptions): ${returnType}`
-          );
-        }
-        // Unary Request
-        else {
-          fileContents.push(
-            `/**`,
-            ` * Unary Request to ${subchain.method.namespace}`,
-            ` */`,
-            `function ${name}(): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Unary Request to ${subchain.method.namespace}`,
-            ` * @param data Data to be sent as part of the request`,
-            ` */`,
-            `function ${name}(data: ${requestType}): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Unary Request to ${subchain.method.namespace}`,
-            ` * @param data Data to be sent as part of the request. Defaults to empty object`,
-            ` * @param abortController Abort controller for canceling the active request`,
-            ` */`,
-            `function ${name}(data: ${requestType} | null, abortController: AbortController): ${returnType}`
-          );
-          fileContents.push(
-            `/**`,
-            ` * Unary Request to ${subchain.method.namespace}`,
-            ` * @param data Data to be sent as part of the request. Defaults to empty object`,
-            ` * @param requestOptions Request options for this specific request`,
-            ` */`,
-            `function ${name}(data: ${requestType} | null, requestOptions: RequestOptions): ${returnType}`
-          );
-        }
+
+        // Close off service
+        builder.deindent();
+        builder.push(`}`);
       }
-    }
-
-    for (const name in serviceChain) {
-      if (Object.keys(serviceChain[name].nested).length) {
-        fileContents.newline();
-        fileContents.push(`namespace ${name} {`);
-        fileContents.indent();
-        this.clientTypesMethodChain(serviceChain[name].nested, fileContents);
-        fileContents.deindent();
-        fileContents.push(`}`);
+      // Keep digging
+      else if (Object.keys(subChain.nested).length) {
+        builder.push(
+          `/**`,
+          ` * ${chainName} Package`,
+          ` * @namespace ${chainName}`,
+          ` */`,
+          `namespace ${chainName} {`
+        );
+        builder.indent();
+        this.clientTypesMethodChain(subChain.nested, builder);
+        builder.deindent();
+        builder.push(`}`);
       }
     }
   }
