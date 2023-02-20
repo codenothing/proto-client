@@ -258,6 +258,7 @@ export class ProtoCli {
       const subProto = rawProto.nested[key];
 
       if (subProto.methods) {
+        // Prefill the service chain
         let serviceMethodChain = this.serviceMethodChain;
         chain.forEach((name) => {
           serviceMethodChain[name] = serviceMethodChain[name] || {
@@ -268,6 +269,7 @@ export class ProtoCli {
           serviceMethodChain = serviceMethodChain[name].nested;
         });
 
+        // Default the current service chain
         const service = serviceMethodChain[key] || {
           nested: {},
           methods: {},
@@ -275,6 +277,7 @@ export class ProtoCli {
         };
         serviceMethodChain[key] = service;
 
+        // Attach request methods
         for (const name in subProto.methods) {
           const method = subProto.methods[name];
           service.methods[name] = {
@@ -359,9 +362,7 @@ export class ProtoCli {
 
         // Attach all methods
         for (const [methodName, method] of Object.entries(subChain.methods)) {
-          const requestType = `${method.requestType}`;
-          const responseType = `${method.responseType}`;
-          const reqResType = `${requestType}, ${responseType}`;
+          const reqResType = `${method.requestType}, ${method.responseType}`;
           const returnType = `ProtoRequest<${reqResType}>`;
 
           // Open method wrapper
@@ -377,8 +378,8 @@ export class ProtoCli {
             builder.pushWithIndent(
               `/**`,
               ` * Bidirectional Request to ${method.namespace}`,
-              ` * @param {StreamWriterSandbox<${requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
-              ` * @param {StreamReader<${responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
+              ` * @param {StreamWriterSandbox<${method.requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
+              ` * @param {StreamReader<${method.responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
               ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
               ` * @returns {Promise<${returnType}>} Request instance`,
               ` */`,
@@ -386,8 +387,8 @@ export class ProtoCli {
               `${builder.indentCharacter}protoClient.makeBidiStreamRequest("${method.namespace}", writerSandbox, streamReader, requestOptions);`,
               `/**`,
               ` * Triggers bidirectional request to ${method.namespace}, returning the ProtoRequest instance`,
-              ` * @param {StreamWriterSandbox<${requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
-              ` * @param {StreamReader<${responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
+              ` * @param {StreamWriterSandbox<${method.requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
+              ` * @param {StreamReader<${method.responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
               ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
               ` * @returns {${returnType}} Request instance`,
               ` */`,
@@ -401,8 +402,8 @@ export class ProtoCli {
             builder.pushWithIndent(
               `/**`,
               ` * Server Stream Request to ${method.namespace}`,
-              ` * @param {${requestType} | StreamReader<${responseType}>} [data] Optional data to be sent as part of the request`,
-              ` * @param {StreamReader<${responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
+              ` * @param {${method.requestType} | StreamReader<${method.responseType}>} [data] Optional data to be sent as part of the request`,
+              ` * @param {StreamReader<${method.responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
               ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
               ` * @returns {Promise<${returnType}>} Request instance`,
               ` */`,
@@ -410,8 +411,8 @@ export class ProtoCli {
               `${builder.indentCharacter}protoClient.makeServerStreamRequest("${method.namespace}", data, streamReader, requestOptions);`,
               `/**`,
               ` * Triggers server stream request to ${method.namespace}, returning the ProtoRequest instance`,
-              ` * @param {${requestType} | StreamReader<${responseType}>} [data] Optional data to be sent as part of the request`,
-              ` * @param {StreamReader<${responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
+              ` * @param {${method.requestType} | StreamReader<${method.responseType}>} [data] Optional data to be sent as part of the request`,
+              ` * @param {StreamReader<${method.responseType}>} [streamReader] Optional iteration function that will be called on every response chunk`,
               ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
               ` * @returns {${returnType}} Request instance`,
               ` */`,
@@ -425,7 +426,7 @@ export class ProtoCli {
             builder.pushWithIndent(
               `/**`,
               ` * Client Stream Request to ${method.namespace}`,
-              ` * @param {StreamWriterSandbox<${requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
+              ` * @param {StreamWriterSandbox<${method.requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
               ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
               ` * @returns {Promise<${returnType}>} Request instance`,
               ` */`,
@@ -433,7 +434,7 @@ export class ProtoCli {
               `${builder.indentCharacter}protoClient.makeClientStreamRequest("${method.namespace}", writerSandbox, requestOptions);`,
               `/**`,
               ` * Triggers client stream request to ${method.namespace}, returning the ProtoRequest instance`,
-              ` * @param {StreamWriterSandbox<${requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
+              ` * @param {StreamWriterSandbox<${method.requestType}> | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream`,
               ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
               ` * @returns {${returnType}} Request instance`,
               ` */`,
@@ -447,7 +448,7 @@ export class ProtoCli {
             builder.pushWithIndent(
               `/**`,
               ` * Unary Request to ${method.namespace}`,
-              ` * @param {${requestType} | null} [data] Optional Data to be sent as part of the request. Defaults to empty object`,
+              ` * @param {${method.requestType} | null} [data] Optional Data to be sent as part of the request. Defaults to empty object`,
               ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
               ` * @returns {Promise<${returnType}>} Request instance`,
               ` */`,
@@ -455,7 +456,7 @@ export class ProtoCli {
               `${builder.indentCharacter}protoClient.makeUnaryRequest("${method.namespace}", data, requestOptions);`,
               `/**`,
               ` * Triggers unary request to ${method.namespace}, returning the ProtoRequest instance`,
-              ` * @param {${requestType} | null} [data] Optional Data to be sent as part of the request. Defaults to empty object`,
+              ` * @param {${method.requestType} | null} [data] Optional Data to be sent as part of the request. Defaults to empty object`,
               ` * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request`,
               ` * @returns {${returnType}} Request instance`,
               ` */`,

@@ -30,6 +30,7 @@ type CreateArgs = Parameters<typeof Protobuf.Message.create>;
 
 /**
  * Internal reason for resolving request
+ * @private
  */
 const enum ResolutionType {
   Default,
@@ -39,6 +40,7 @@ const enum ResolutionType {
 
 /**
  * Add internal options to external request params
+ * @private
  */
 interface ProtoRequestProps<RequestType, ResponseType>
   extends GenericRequestParams<RequestType, ResponseType> {
@@ -623,6 +625,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
   /**
    * Runs any middleware attached to the client
+   * @private
    */
   private async runMiddleware() {
     for (const middleware of this.client.middleware) {
@@ -889,7 +892,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     if (!this.isRequestStream || !stream || this.pipeStream) {
       return;
     } else if (!this.writerSandbox) {
-      this.writeStream?.end();
+      stream.end();
       return;
     }
 
@@ -1055,6 +1058,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       this.retries < this.retryOptions.retryCount &&
       code !== undefined &&
       approvedCodes.includes(code) &&
+      // Piped streams can not be retried
       !this.pipeStream
     );
   }
@@ -1070,8 +1074,8 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
   /**
    * Enhanced "end" event listener. Adds promise to a queue, waiting for the request
-   * to complete, rejecting on any failures. If the request is already complete, the
-   * result is returned (or exception raised)
+   * to complete, rejecting on failures only if configured to. If the request is already
+   * complete, the result is returned (or exception raised)
    * @returns {ProtoRequest} This ProtoRequest instance
    */
   public async waitForEnd(): Promise<ProtoRequest<RequestType, ResponseType>> {
