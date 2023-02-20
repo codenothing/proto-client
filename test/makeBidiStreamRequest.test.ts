@@ -9,6 +9,7 @@ import {
   wait,
 } from "./utils";
 import { MockServiceError } from "./MockServiceError";
+import { Readable } from "stream";
 
 describe("makeBidiStreamRequest", () => {
   let RESPONSE_DELAY: number;
@@ -156,6 +157,35 @@ describe("makeBidiStreamRequest", () => {
     ]);
   });
 
+  test("should handle readable stream passed instead of stream writer", async () => {
+    const customers: Customer[] = [
+      {
+        id: "circleci",
+        name: "CircleCI",
+      },
+      {
+        id: "vscode",
+        name: "VSCode",
+      },
+    ];
+    const readCustomers: Customer[] = [];
+
+    await makeBidiStreamRequest(Readable.from(customers), async (row) => {
+      readCustomers.push(row);
+    });
+
+    expect(readCustomers).toEqual([
+      {
+        id: "circleci",
+        name: "CircleCI",
+      },
+      {
+        id: "vscode",
+        name: "VSCode",
+      },
+    ]);
+  });
+
   test("should ignore first try failure if the retry is successful", async () => {
     RESPONSE_DELAY = 1000;
     return new Promise<void>((resolve, reject) => {
@@ -211,31 +241,31 @@ describe("makeBidiStreamRequest", () => {
   });
 
   test("should propagate write sandbox errors", async () => {
-    await expect(
-      makeBidiStreamRequest(
-        async () => {
-          await wait();
-          throw new Error(`Mock Write Sandbox Error`);
-        },
-        async () => {
-          throw new Error(`Should never get to read processing`);
-        }
-      )
-    ).rejects.toThrow(`Mock Write Sandbox Error`);
+    const { error } = await makeBidiStreamRequest(
+      async () => {
+        await wait();
+        throw new Error(`Mock Write Sandbox Error`);
+      },
+      async () => {
+        throw new Error(`Should never get to read processing`);
+      }
+    );
+
+    expect(error?.message).toEqual(`Mock Write Sandbox Error`);
   });
 
   test("should propagate invalid write data errors", async () => {
-    await expect(
-      makeBidiStreamRequest(
-        async (write) => {
-          await wait();
-          await write({ id: 1234 } as never);
-        },
-        async () => {
-          throw new Error(`Should never get to read processing`);
-        }
-      )
-    ).rejects.toThrow(`id: string expected`);
+    const { error } = await makeBidiStreamRequest(
+      async (write) => {
+        await wait();
+        await write({ id: 1234 } as never);
+      },
+      async () => {
+        throw new Error(`Should never get to read processing`);
+      }
+    );
+
+    expect(error?.message).toEqual(`id: string expected`);
   });
 
   test("should throw error when trying to write on a closed sandbox", async () => {
@@ -264,48 +294,48 @@ describe("makeBidiStreamRequest", () => {
   });
 
   test("should propagate read sandbox errors", async () => {
-    await expect(
-      makeBidiStreamRequest(
-        async (write) => {
-          await write({
-            id: "circleci",
-            name: "CircleCI",
-          });
-        },
-        async () => {
-          throw new Error(`Mock Read Processing Error`);
-        }
-      )
-    ).rejects.toThrow(`Mock Read Processing Error`);
+    const { error } = await makeBidiStreamRequest(
+      async (write) => {
+        await write({
+          id: "circleci",
+          name: "CircleCI",
+        });
+      },
+      async () => {
+        throw new Error(`Mock Read Processing Error`);
+      }
+    );
+
+    expect(error?.message).toEqual(`Mock Read Processing Error`);
   });
 
   test("should propagate timeout errors", async () => {
     RESPONSE_DELAY = 1000;
-    await expect(
-      makeBidiStreamRequest(
-        async (write) => {
-          await write({ id: "circleci", name: "CircleCI" });
-        },
-        async () => undefined,
-        { timeout: 100 }
-      )
-    ).rejects.toThrow(
+    const { error } = await makeBidiStreamRequest(
+      async (write) => {
+        await write({ id: "circleci", name: "CircleCI" });
+      },
+      async () => undefined,
+      { timeout: 100 }
+    );
+
+    expect(error?.message).toEqual(
       `makeBidiStreamRequest for 'customers.Customers.CreateCustomers' timed out`
     );
   });
 
   test("should handle service errors", async () => {
     THROW_ERROR_RESPONSE = true;
-    await expect(
-      makeBidiStreamRequest(
-        async (write) => {
-          await write({ id: "circleci", name: "CircleCI" });
-        },
-        async () => {
-          throw new Error(`Should not get to streamReader`);
-        }
-      )
-    ).rejects.toThrow(`13 INTERNAL: Generic Service Error`);
+    const { error } = await makeBidiStreamRequest(
+      async (write) => {
+        await write({ id: "circleci", name: "CircleCI" });
+      },
+      async () => {
+        throw new Error(`Should not get to streamReader`);
+      }
+    );
+
+    expect(error?.message).toEqual(`13 INTERNAL: Generic Service Error`);
   });
 
   test("should ignore aborted requests", async () => {

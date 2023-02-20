@@ -12,6 +12,7 @@ import {
   StreamWriterSandbox,
 } from "../src";
 import { promisify } from "util";
+import { EventEmitter, Readable } from "stream";
 
 let activeServers: Server[] = [];
 let activeClient: ProtoClient | undefined;
@@ -60,12 +61,15 @@ export const makeUnaryRequest = (
   );
 
 export const makeClientStreamRequest = (
-  writerSandbox: StreamWriterSandbox<Customer, CustomersResponse>,
+  writerSandbox?:
+    | StreamWriterSandbox<Customer, CustomersResponse>
+    | Readable
+    | EventEmitter,
   requestOptions?: RequestOptions | AbortController
 ) =>
   getClient().makeClientStreamRequest<Customer, CustomersResponse>(
     "customers.Customers.EditCustomer",
-    writerSandbox,
+    writerSandbox as StreamWriterSandbox<Customer, CustomersResponse>,
     requestOptions as RequestOptions
   );
 
@@ -82,13 +86,66 @@ export const makeServerStreamRequest = (
   );
 
 export const makeBidiStreamRequest = (
-  writerSandbox: StreamWriterSandbox<Customer, Customer>,
+  writerSandbox:
+    | StreamWriterSandbox<Customer, Customer>
+    | Readable
+    | EventEmitter,
   streamReader: StreamReader<Customer, Customer>,
   requestOptions?: RequestOptions | AbortController
 ) =>
   getClient().makeBidiStreamRequest<Customer, Customer>(
     "customers.Customers.CreateCustomers",
-    writerSandbox,
+    writerSandbox as StreamWriterSandbox<Customer, Customer>,
+    streamReader,
+    requestOptions as RequestOptions
+  );
+
+export const getUnaryRequest = (
+  data?: GetCustomerRequest,
+  requestOptions?: RequestOptions | AbortController
+) =>
+  getClient().getUnaryRequest<GetCustomerRequest, Customer>(
+    "customers.Customers.GetCustomer",
+    data as GetCustomerRequest,
+    requestOptions as RequestOptions
+  );
+
+export const getClientStreamRequest = (
+  writerSandbox?:
+    | StreamWriterSandbox<Customer, CustomersResponse>
+    | Readable
+    | EventEmitter,
+  requestOptions?: RequestOptions | AbortController
+) =>
+  getClient().getClientStreamRequest<Customer, CustomersResponse>(
+    "customers.Customers.EditCustomer",
+    writerSandbox as StreamWriterSandbox<Customer, CustomersResponse>,
+    requestOptions as RequestOptions
+  );
+
+export const getServerStreamRequest = (
+  data?: FindCustomersRequest | StreamReader<FindCustomersRequest, Customer>,
+  streamReader?: StreamReader<FindCustomersRequest, Customer>,
+  requestOptions?: RequestOptions | AbortController
+) =>
+  getClient().getServerStreamRequest<FindCustomersRequest, Customer>(
+    "customers.Customers.FindCustomers",
+    data as FindCustomersRequest,
+    streamReader as StreamReader<FindCustomersRequest, Customer>,
+    requestOptions as RequestOptions
+  );
+
+export const getBidiStreamRequest = (
+  writerSandbox:
+    | StreamWriterSandbox<Customer, Customer>
+    | Readable
+    | EventEmitter,
+  streamReader: StreamReader<Customer, Customer>,
+  requestOptions?: RequestOptions | AbortController
+) =>
+  getClient().getBidiStreamRequest<Customer, Customer>(
+    "customers.Customers.CreateCustomers",
+    writerSandbox as StreamWriterSandbox<Customer, Customer>,
     streamReader,
     requestOptions as RequestOptions
   );

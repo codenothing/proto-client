@@ -52,24 +52,21 @@ describe("metadata", () => {
   test("should fail the request if an error is thrown in the middleware", async () => {
     thrownEntity = new Error(`Mock Middleware Error`);
 
-    await expect(makeUnaryRequest({ id: "github" })).rejects.toThrow(
-      `Mock Middleware Error`
-    );
+    const { error } = await makeUnaryRequest({ id: "github" });
+    expect(error?.message).toStrictEqual(`Mock Middleware Error`);
   });
 
   test("should fail the request if a string is thrown in the middleware", async () => {
     thrownEntity = `Mock String Middleware Error`;
 
-    await expect(makeUnaryRequest({ id: "github" })).rejects.toThrow(
-      `Mock String Middleware Error`
-    );
+    const { error } = await makeUnaryRequest({ id: "github" });
+    expect(error?.message).toStrictEqual(`Mock String Middleware Error`);
   });
 
   test("should fail the request anything is thrown in the middleware", async () => {
     thrownEntity = { custom: "Some Custom Thrown Object" };
 
-    await expect(makeUnaryRequest({ id: "github" })).rejects.toThrow(
-      `Unknown Middleware Error: [object Object]`
-    );
+    const { error } = await makeUnaryRequest({ id: "github" });
+    expect(error?.message).toStrictEqual(`Unknown Middleware Error`);
   });
 });

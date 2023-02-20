@@ -8,6 +8,7 @@ import type {
   ClientEndpoint,
   ClientSettings,
   EndpointMatcher,
+  GenericRequestParams,
   ProtoSettings,
   RequestMiddleware,
   RequestOptions,
@@ -15,6 +16,7 @@ import type {
   StreamWriterSandbox,
 } from "./interfaces";
 import { generateEndpointMatcher } from "./util";
+import type { Readable } from "stream";
 
 export interface ProtoClient {
   on(event: "request", listener: (request: UntypedProtoRequest) => void): this;
@@ -30,6 +32,7 @@ export interface ProtoClient {
 export class ProtoClient extends EventEmitter {
   /**
    * Client settings
+   * @type {ClientSettings}
    */
   public clientSettings: ClientSettings = {
     endpoint: `0.0.0.0:8080`,
@@ -37,11 +40,13 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Protobuf parsing settings
+   * @type {ProtoSettings}
    */
   public protoSettings: ProtoSettings = {};
 
   /**
    * Internal proto conversion options, for referencing
+   * @type {Protobuf.IConversionOptions}
    */
   public protoConversionOptions: Protobuf.IConversionOptions = {
     longs: Number,
@@ -52,21 +57,29 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * List of currently active requests
+   * @type {ProtoRequest[]}
    */
   public activeRequests: UntypedProtoRequest[] = [];
 
   /**
-   * Middleware to run before each request
+   * Internal reference to middleware list that will run before each request
+   * @type {RequestMiddleware[]}
+   * @readonly
+   * @package
    */
-  public middleware: RequestMiddleware[] = [];
+  public readonly middleware: RequestMiddleware[] = [];
 
   /**
    * Root protobuf object for referencing
+   * @type {Protobuf.Root | undefined}
+   * @private
    */
   private root?: Protobuf.Root;
 
   /**
    * Client endpoints list
+   * @type {Array<{endpoint: ClientEndpoint, match: EndpointMatcher, client: Client}>}
+   * @private
    */
   private clients: Array<{
     endpoint: ClientEndpoint;
@@ -76,7 +89,7 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Shorthand wrapper utilities for gRPC client calls
-   * @param options Configuration options for the client
+   * @param {{clientSettings: ClientSettings, protoSettings: ProtoSettings, conversionOptions: Protobuf.IConversionOptions}} [options] Configuration options for the client
    */
   constructor(options?: {
     clientSettings?: ClientSettings;
@@ -100,9 +113,9 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Configures settings for client connection
-   * @param clientSettings Settings for client connection
+   * @param {ClientSettings} clientSettings Settings for client connection
    */
-  public configureClient(clientSettings: ClientSettings) {
+  public configureClient(clientSettings: ClientSettings): void {
     this.clientSettings = clientSettings;
 
     this.close();
@@ -151,9 +164,10 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Configures options for reading/writing proto definitions
-   * @param protoSettings Proto reading/writing settings
+   * @param {ProtoSettings} protoSettings Proto reading/writing settings
+   * @throws Exception if no root can be configured from the settings
    */
-  public configureProtos(protoSettings: ProtoSettings) {
+  public configureProtos(protoSettings: ProtoSettings): void {
     this.protoSettings = protoSettings;
 
     if (this.protoSettings.files) {
@@ -172,16 +186,19 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Configures conversion options when decoding proto responses
-   * @param options Conversion options
+   * @param {Protobuf.IConversionOptions} options Conversion options
    */
-  public configureConversionOptions(options: Protobuf.IConversionOptions) {
+  public configureConversionOptions(
+    options: Protobuf.IConversionOptions
+  ): void {
     this.protoConversionOptions = options;
   }
 
   /**
    * Fetches the endpoint matching client instance
-   * throwing an error if not yet configured
-   * @param request Active request looking for it's client endpoint
+   * @param {ProtoRequest} request Active request looking for it's client endpoint
+   * @returns {Client} gRPC client interface
+   * @throws Exception if client is not yet configured, or no methods match the client
    */
   public getClient(request: UntypedProtoRequest): Client {
     if (!this.clients.length) {
@@ -202,7 +219,9 @@ export class ProtoClient extends EventEmitter {
   }
 
   /**
-   * Fetches the current proto root object, throwing an error if not yet configured
+   * Fetches the current proto root object
+   * @returns {Protobuf.Root} Root protobuf instance
+   * @throws Exception if root is not configured yet
    */
   public getRoot(): Protobuf.Root {
     if (!this.root) {
@@ -214,122 +233,377 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Adds function to the middleware stack
-   * @param middleware Middleware to run before each request
+   * @param {RequestMiddleware} middleware Middleware to run before each request
    */
-  public useMiddleware(middleware: RequestMiddleware) {
+  public useMiddleware(middleware: RequestMiddleware): void {
     this.middleware.push(middleware);
   }
 
   /**
    * Sends unary (request/response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
    */
   public async makeUnaryRequest<ResponseType>(
     method: string
-  ): Promise<ProtoRequest<unknown, ResponseType | undefined>>;
+  ): Promise<ProtoRequest<unknown, ResponseType>>;
 
   /**
    * Sends unary (request/response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param data Data to be sent as part of the request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeUnaryRequest<RequestType, ResponseType>(
     method: string,
     data: RequestType
-  ): Promise<ProtoRequest<RequestType, ResponseType | undefined>>;
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
   /**
    * Sends unary (request/response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param data Data to be sent as part of the request. Defaults to empty object
-   * @param abortController Abort controller for canceling the active request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType | null} data Data to be sent as part of the request
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeUnaryRequest<RequestType, ResponseType>(
     method: string,
     data: RequestType | null,
     abortController: AbortController
-  ): Promise<ProtoRequest<RequestType, ResponseType | undefined>>;
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
   /**
    * Sends unary (request/response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param data Data to be sent as part of the request. Defaults to empty object
-   * @param requestOptions Options for this specific request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType | null} data Data to be sent as part of the request
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeUnaryRequest<RequestType, ResponseType>(
     method: string,
     data: RequestType | null,
     requestOptions: RequestOptions
-  ): Promise<ProtoRequest<RequestType, ResponseType | undefined>>;
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
-  // Actual makeUnaryRequest for the overloads above
+  /**
+   * Sends unary (request/response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType | null} [data] Optional Data to be sent as part of the request. Defaults to empty object
+   * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
   public async makeUnaryRequest<RequestType, ResponseType>(
     method: string,
     data?: RequestType | null,
     requestOptions?: AbortController | RequestOptions
-  ): Promise<ProtoRequest<RequestType, ResponseType | undefined>> {
-    const request = await this.generateRequest<RequestType, ResponseType>(
+  ): Promise<ProtoRequest<RequestType, ResponseType>> {
+    return await this.getUnaryRequest<RequestType, ResponseType>(
       method,
-      RequestMethodType.UnaryRequest,
-      requestOptions
-    );
+      data as RequestType,
+      requestOptions as RequestOptions
+    ).waitForEnd();
+  }
 
-    return request.makeUnaryRequest(data);
+  /**
+   * Triggers unary (request/response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
+   */
+  public getUnaryRequest<ResponseType>(
+    method: string
+  ): ProtoRequest<unknown, ResponseType>;
+
+  /**
+   * Triggers unary (request/response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getUnaryRequest<RequestType, ResponseType>(
+    method: string,
+    data: RequestType
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers unary (request/response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType | null} data Data to be sent as part of the request
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getUnaryRequest<RequestType, ResponseType>(
+    method: string,
+    data: RequestType | null,
+    abortController: AbortController
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers unary (request/response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType | null} data Data to be sent as part of the request
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getUnaryRequest<RequestType, ResponseType>(
+    method: string,
+    data: RequestType | null,
+    requestOptions: RequestOptions
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers unary (request/response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType | null} [data] Optional Data to be sent as part of the request. Defaults to empty object
+   * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getUnaryRequest<RequestType, ResponseType>(
+    method: string,
+    data?: RequestType | null,
+    requestOptions?: AbortController | RequestOptions
+  ): ProtoRequest<RequestType, ResponseType> {
+    return this.getRequest<RequestType, ResponseType>({
+      method,
+      requestMethodType: RequestMethodType.UnaryRequest,
+      data: data === null ? undefined : data,
+      requestOptions:
+        requestOptions instanceof AbortController
+          ? { abortController: requestOptions }
+          : requestOptions,
+    });
   }
 
   /**
    * Sends client stream (request stream, single response) request to the service endpoint.
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param writerSandbox Async supported callback for writing data to the open stream
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeClientStreamRequest<RequestType, ResponseType>(
+    method: string
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @returns {ProtoRequest} Request instance
    */
   public async makeClientStreamRequest<RequestType, ResponseType>(
     method: string,
     writerSandbox: StreamWriterSandbox<RequestType, ResponseType>
-  ): Promise<ProtoRequest<RequestType, ResponseType | undefined>>;
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
   /**
    * Sends client stream (request stream, single response) request to the service endpoint.
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param writerSandbox Async supported callback for writing data to the open stream
-   * @param abortController Abort controller for canceling the active request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeClientStreamRequest<RequestType, ResponseType>(
     method: string,
     writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
     abortController: AbortController
-  ): Promise<ProtoRequest<RequestType, ResponseType | undefined>>;
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
   /**
    * Sends client stream (request stream, single response) request to the service endpoint.
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param writerSandbox Async supported callback for writing data to the open stream
-   * @param requestOptions Options for this specific request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeClientStreamRequest<RequestType, ResponseType>(
     method: string,
     writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
     requestOptions: RequestOptions
-  ): Promise<ProtoRequest<RequestType, ResponseType | undefined>>;
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
-  // Actual makeClientStreamRequest for the overloads above
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @returns {ProtoRequest} Request instance
+   */
   public async makeClientStreamRequest<RequestType, ResponseType>(
     method: string,
-    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
-    requestOptions?: AbortController | RequestOptions
-  ): Promise<ProtoRequest<RequestType, ResponseType | undefined>> {
-    const request = await this.generateRequest<RequestType, ResponseType>(
-      method,
-      RequestMethodType.ClientStreamRequest,
-      requestOptions
-    );
+    stream: Readable | EventEmitter
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
-    return request.makeClientStreamRequest(writerSandbox);
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    abortController: AbortController
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    requestOptions: RequestOptions
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox | Readable | EventEmitter} writerSandbox Optional async supported callback for writing data to the open stream
+   * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox?:
+      | StreamWriterSandbox<RequestType, ResponseType>
+      | Readable
+      | EventEmitter,
+    requestOptions?: AbortController | RequestOptions
+  ): Promise<ProtoRequest<RequestType, ResponseType>> {
+    return await this.getClientStreamRequest<RequestType, ResponseType>(
+      method,
+      writerSandbox as StreamWriterSandbox<RequestType, ResponseType>,
+      requestOptions as RequestOptions
+    ).waitForEnd();
+  }
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
+   */
+  public getClientStreamRequest<RequestType, ResponseType>(
+    method: string
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @returns {ProtoRequest} Request instance
+   */
+  public getClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @returns {ProtoRequest} Request instance
+   */
+  public getClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
+    abortController: AbortController
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    abortController: AbortController
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
+    requestOptions: RequestOptions
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends client stream (request stream, single response) request to the service endpoint.
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    requestOptions: RequestOptions
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers client stream (request stream, single response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox | Readable | EventEmitter} writerSandbox Optional async supported callback for writing data to the open stream
+   * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getClientStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox?:
+      | StreamWriterSandbox<RequestType, ResponseType>
+      | Readable
+      | EventEmitter,
+    requestOptions?: AbortController | RequestOptions
+  ): ProtoRequest<RequestType, ResponseType> {
+    return this.getRequest<RequestType, ResponseType>({
+      method,
+      requestMethodType: RequestMethodType.ClientStreamRequest,
+      writerSandbox:
+        typeof writerSandbox === "function" ? writerSandbox : undefined,
+      pipeStream:
+        typeof writerSandbox === "function" ? undefined : writerSandbox,
+      requestOptions:
+        requestOptions instanceof AbortController
+          ? { abortController: requestOptions }
+          : requestOptions,
+    });
   }
 
   /**
    * Sends a server stream (single request, streamed response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param streamReader Iteration function that will be called on every response chunk
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeServerStreamRequest<ResponseType>(
+    method: string
+  ): Promise<ProtoRequest<unknown, ResponseType>>;
+
+  /**
+   * Sends a server stream (single request, streamed response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @returns {ProtoRequest} Request instance
    */
   public async makeServerStreamRequest<ResponseType>(
     method: string,
@@ -338,9 +612,21 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Sends a server stream (single request, streamed response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param data Data to be sent as part of the request
-   * @param streamReader Iteration function that will be called on every response chunk
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeServerStreamRequest<RequestType, ResponseType = unknown>(
+    method: string,
+    data: RequestType
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends a server stream (single request, streamed response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @returns {ProtoRequest} Request instance
    */
   public async makeServerStreamRequest<RequestType, ResponseType>(
     method: string,
@@ -350,10 +636,11 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Sends a server stream (single request, streamed response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param data Data to be sent as part of the request
-   * @param streamReader Iteration function that will be called on every response chunk
-   * @param abortController Abort controller for canceling the active request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeServerStreamRequest<RequestType, ResponseType>(
     method: string,
@@ -364,10 +651,11 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Sends a server stream (single request, streamed response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param data Data to be sent as part of the request
-   * @param streamReader Iteration function that will be called on every response chunk
-   * @param requestOptions Options for this specific request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeServerStreamRequest<RequestType, ResponseType>(
     method: string,
@@ -376,27 +664,158 @@ export class ProtoClient extends EventEmitter {
     requestOptions: RequestOptions
   ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
-  // Actual makeServerStreamRequest for the overloads above
+  /**
+   * Sends a server stream (single request, streamed response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType | StreamReader} [data] Optional data to be sent as part of the request
+   * @param {StreamReader} [streamReader] Optional iteration function that will be called on every response chunk
+   * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
   public async makeServerStreamRequest<RequestType, ResponseType>(
     method: string,
-    data: RequestType | StreamReader<RequestType, ResponseType>,
+    data?: RequestType | StreamReader<RequestType, ResponseType>,
     streamReader?: StreamReader<RequestType, ResponseType>,
     requestOptions?: AbortController | RequestOptions
   ): Promise<ProtoRequest<RequestType, ResponseType>> {
-    const request = await this.generateRequest<RequestType, ResponseType>(
+    return await this.getServerStreamRequest(
       method,
-      RequestMethodType.ServerStreamRequest,
-      requestOptions
-    );
+      data as RequestType,
+      streamReader as StreamReader<RequestType, ResponseType>,
+      requestOptions as RequestOptions
+    ).waitForEnd();
+  }
 
-    return request.makeServerStreamRequest(data, streamReader);
+  /**
+   * Triggers server stream (single request, streamed response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
+   */
+  public getServerStreamRequest<ResponseType>(
+    method: string
+  ): ProtoRequest<unknown, ResponseType>;
+
+  /**
+   * Triggers server stream (single request, streamed response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @returns {ProtoRequest} Request instance
+   */
+  public getServerStreamRequest<ResponseType>(
+    method: string,
+    streamReader: StreamReader<unknown, ResponseType>
+  ): ProtoRequest<unknown, ResponseType>;
+
+  /**
+   * Triggers server stream (single request, streamed response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getServerStreamRequest<RequestType, ResponseType = unknown>(
+    method: string,
+    data: RequestType
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers server stream (single request, streamed response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @returns {ProtoRequest} Request instance
+   */
+  public getServerStreamRequest<RequestType, ResponseType>(
+    method: string,
+    data: RequestType,
+    streamReader: StreamReader<RequestType, ResponseType>
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers server stream (single request, streamed response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getServerStreamRequest<RequestType, ResponseType>(
+    method: string,
+    data: RequestType,
+    streamReader: StreamReader<RequestType, ResponseType>,
+    abortController: AbortController
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers server stream (single request, streamed response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType} data Data to be sent as part of the request
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getServerStreamRequest<RequestType, ResponseType>(
+    method: string,
+    data: RequestType,
+    streamReader: StreamReader<RequestType, ResponseType>,
+    requestOptions: RequestOptions
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers server stream (single request, streamed response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {RequestType | StreamReader} [data] Optional data to be sent as part of the request
+   * @param {StreamReader} [streamReader] Optional iteration function that will be called on every response chunk
+   * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getServerStreamRequest<RequestType, ResponseType>(
+    method: string,
+    data?: RequestType | StreamReader<RequestType, ResponseType>,
+    streamReader?: StreamReader<RequestType, ResponseType>,
+    requestOptions?: AbortController | RequestOptions
+  ): ProtoRequest<RequestType, ResponseType> {
+    return this.getRequest<RequestType, ResponseType>({
+      method,
+      requestMethodType: RequestMethodType.ServerStreamRequest,
+      data: typeof data === "function" ? undefined : data,
+      streamReader:
+        typeof data === "function"
+          ? (data as StreamReader<RequestType, ResponseType>)
+          : streamReader,
+      requestOptions:
+        requestOptions instanceof AbortController
+          ? { abortController: requestOptions }
+          : requestOptions,
+    });
   }
 
   /**
    * Sends a bi-directional (stream request, stream response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param writerSandbox Async supported callback for writing data to the open stream
-   * @param streamReader Iteration function that will be called on every response chunk
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeBidiStreamRequest<
+    RequestType = unknown,
+    ResponseType = unknown
+  >(method: string): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeBidiStreamRequest<RequestType, ResponseType = unknown>(
+    method: string,
+    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @returns {ProtoRequest} Request instance
    */
   public async makeBidiStreamRequest<RequestType, ResponseType>(
     method: string,
@@ -406,10 +825,11 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Sends a bi-directional (stream request, stream response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param writerSandbox Async supported callback for writing data to the open stream
-   * @param streamReader Iteration function that will be called on every response chunk
-   * @param abortController Abort controller for canceling the active request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeBidiStreamRequest<RequestType, ResponseType>(
     method: string,
@@ -420,10 +840,11 @@ export class ProtoClient extends EventEmitter {
 
   /**
    * Sends a bi-directional (stream request, stream response) request to the service endpoint
-   * @param method Fully qualified path of the method for the request that can be used by protobufjs.lookup
-   * @param writerSandbox Async supported callback for writing data to the open stream
-   * @param streamReader Iteration function that will be called on every response chunk
-   * @param requestOptions Options for this specific request
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
    */
   public async makeBidiStreamRequest<RequestType, ResponseType>(
     method: string,
@@ -432,41 +853,334 @@ export class ProtoClient extends EventEmitter {
     requestOptions: RequestOptions
   ): Promise<ProtoRequest<RequestType, ResponseType>>;
 
-  // Actual makeBidiStreamRequest for the overloads above
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeBidiStreamRequest<RequestType, ResponseType = unknown>(
+    method: string,
+    stream: Readable | EventEmitter
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @returns {ProtoRequest} Request instance
+   */
   public async makeBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    streamReader: StreamReader<RequestType, ResponseType>
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    streamReader: StreamReader<RequestType, ResponseType>,
+    abortController: AbortController
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    streamReader: StreamReader<RequestType, ResponseType>,
+    requestOptions: RequestOptions
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream
+   * @param {StreamReader} [streamReader] Optional iteration function that will be called on every response chunk
+   * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox?:
+      | StreamWriterSandbox<RequestType, ResponseType>
+      | Readable
+      | EventEmitter,
+    streamReader?: StreamReader<RequestType, ResponseType>,
+    requestOptions?: AbortController | RequestOptions
+  ): Promise<ProtoRequest<RequestType, ResponseType>> {
+    return await this.getBidiStreamRequest(
+      method,
+      writerSandbox as StreamWriterSandbox<RequestType, ResponseType>,
+      streamReader as StreamReader<RequestType, ResponseType>,
+      requestOptions as RequestOptions
+    ).waitForEnd();
+  }
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType = unknown, ResponseType = unknown>(
+    method: string
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType = unknown>(
+    method: string,
+    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType = unknown>(
+    method: string,
+    stream: Readable | EventEmitter
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
+    streamReader: StreamReader<RequestType, ResponseType>
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    streamReader: StreamReader<RequestType, ResponseType>
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType>(
     method: string,
     writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
     streamReader: StreamReader<RequestType, ResponseType>,
-    requestOptions?: AbortController | RequestOptions
-  ): Promise<ProtoRequest<RequestType, ResponseType>> {
-    const request = await this.generateRequest<RequestType, ResponseType>(
-      method,
-      RequestMethodType.BidiStreamRequest,
-      requestOptions
-    );
+    abortController: AbortController
+  ): ProtoRequest<RequestType, ResponseType>;
 
-    return request.makeBidiStreamRequest(writerSandbox, streamReader);
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {AbortController} abortController Abort controller for canceling the active request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    streamReader: StreamReader<RequestType, ResponseType>,
+    abortController: AbortController
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox} writerSandbox Async supported callback for writing data to the open stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
+    streamReader: StreamReader<RequestType, ResponseType>,
+    requestOptions: RequestOptions
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Sends a bi-directional (stream request, stream response) request to the service endpoint
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {Readable | EventEmitter} stream Readable like stream for piping into the request stream
+   * @param {StreamReader} streamReader Iteration function that will be called on every response chunk
+   * @param {RequestOptions} requestOptions Options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    stream: Readable | EventEmitter,
+    streamReader: StreamReader<RequestType, ResponseType>,
+    requestOptions: RequestOptions
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Triggers bi-directional (stream request, stream response) request to the service endpoint, returning the ProtoRequest instance
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @param {StreamWriterSandbox | Readable | EventEmitter} [writerSandbox] Optional async supported callback for writing data to the open stream
+   * @param {StreamReader} [streamReader] Optional iteration function that will be called on every response chunk
+   * @param {AbortController | RequestOptions} [requestOptions] Optional request options for this specific request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getBidiStreamRequest<RequestType, ResponseType>(
+    method: string,
+    writerSandbox?:
+      | StreamWriterSandbox<RequestType, ResponseType>
+      | Readable
+      | EventEmitter,
+    streamReader?: StreamReader<RequestType, ResponseType>,
+    requestOptions?: AbortController | RequestOptions
+  ): ProtoRequest<RequestType, ResponseType> {
+    return this.getRequest<RequestType, ResponseType>({
+      method,
+      requestMethodType: RequestMethodType.BidiStreamRequest,
+      writerSandbox:
+        typeof writerSandbox === "function" ? writerSandbox : undefined,
+      pipeStream:
+        typeof writerSandbox === "function" ? undefined : writerSandbox,
+      streamReader,
+      requestOptions:
+        requestOptions instanceof AbortController
+          ? { abortController: requestOptions }
+          : requestOptions,
+    });
+  }
+
+  /**
+   * Starts a proto request, and waits for the results
+   * @param {string} method Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeRequest<RequestType = unknown, ResponseType = unknown>(
+    method: string
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Starts a proto request, and waits for the results
+   * @param {GenericRequestParams} params Request parameters for making a proto request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeRequest<RequestType = unknown, ResponseType = unknown>(
+    params: GenericRequestParams<RequestType, ResponseType>
+  ): Promise<ProtoRequest<RequestType, ResponseType>>;
+
+  /**
+   * Starts a proto request, and waits for the results
+   * @param {string | GenericRequestParams} params Method path or request parameters for making a proto request
+   * @returns {ProtoRequest} Request instance
+   */
+  public async makeRequest<RequestType = unknown, ResponseType = unknown>(
+    params: string | GenericRequestParams<RequestType, ResponseType>
+  ): Promise<ProtoRequest<RequestType, ResponseType>> {
+    return await this.getRequest<RequestType, ResponseType>(
+      params as GenericRequestParams<RequestType, ResponseType>
+    ).waitForEnd();
+  }
+
+  /**
+   * Generates and starts a proto request
+   * @param {string} params Request parameters for making a proto request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getRequest<RequestType = unknown, ResponseType = unknown>(
+    method: string
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Generates and starts a proto request
+   * @param {GenericRequestParams} params Request parameters for making a proto request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getRequest<RequestType = unknown, ResponseType = unknown>(
+    params: GenericRequestParams<RequestType, ResponseType>
+  ): ProtoRequest<RequestType, ResponseType>;
+
+  /**
+   * Generates and starts a proto request
+   * @param {string | GenericRequestParams} params Method path or request parameters for making a proto request
+   * @returns {ProtoRequest} Request instance
+   */
+  public getRequest<RequestType = unknown, ResponseType = unknown>(
+    params: string | GenericRequestParams<RequestType, ResponseType>
+  ): ProtoRequest<RequestType, ResponseType> {
+    if (typeof params === "string") {
+      params = { method: params };
+    }
+
+    const request = new ProtoRequest<RequestType, ResponseType>({
+      client: this,
+      ...params,
+    });
+
+    // Attach request to the overall client
+    this.activeRequests.push(request);
+    request.on("aborted", () => this.removeActiveRequest(request));
+    request.on("error", () => this.removeActiveRequest(request));
+    request.on("end", () => this.removeActiveRequest(request));
+
+    // Let any listeners know
+    this.emit("request", request);
+
+    return request;
   }
 
   /**
    * Aborts all requests that match the method defined
-   * @param match Method to match
+   * @param {string} match Method to match
    */
   public abortRequests(match: string): void;
 
   /**
    * Aborts all requests whose method passes the regex test
-   * @param match Regex run against the method namespace for matching
+   * @param {RegExp} match Regex run against the method namespace for matching
    */
   public abortRequests(match: RegExp): void;
 
   /**
    * Aborts all requests that pass the match function
-   * @param match Endpoint matcher util
+   * @param {EndpointMatcher} match Endpoint matcher util
    */
   public abortRequests(match: EndpointMatcher): void;
 
-  // Actual abortRequests for the overloads above
+  /**
+   * Aborts all requests that pass the matcher
+   * @param {string | RegExp | EndpointMatcher} match Matching string/regex/function to filter request down that should be aborted
+   */
   public abortRequests(match: string | RegExp | EndpointMatcher): void {
     const matcher: EndpointMatcher = generateEndpointMatcher(match);
 
@@ -487,57 +1201,11 @@ export class ProtoClient extends EventEmitter {
   }
 
   /**
-   * Manages request within the active requests list
-   * @param method Method name for the request
-   * @param requestMethodType Method type
-   */
-  private async generateRequest<RequestType, ResponseType>(
-    method: string,
-    requestMethodType: RequestMethodType,
-    requestOptions: AbortController | RequestOptions | undefined
-  ): Promise<ProtoRequest<RequestType, ResponseType>> {
-    const request = new ProtoRequest<RequestType, ResponseType>(
-      this,
-      method,
-      requestMethodType,
-      requestOptions
-    );
-
-    request.on("aborted", () => this.removeActiveRequest(request));
-    request.on("end", () => this.removeActiveRequest(request));
-
-    this.activeRequests.push(request);
-
-    // Run middleware
-    try {
-      for (const middleware of this.middleware) {
-        await middleware(request, this);
-      }
-    } catch (e) {
-      if (e instanceof Error) {
-        request.error = e;
-      } else if (typeof e === "string") {
-        request.error = new Error(e);
-      } else {
-        request.error = new Error(`Unknown Middleware Error: ${e}`);
-      }
-
-      this.removeActiveRequest(request);
-      request.emit("end", request);
-
-      throw request.error;
-    }
-
-    this.emit("request", request);
-
-    return request;
-  }
-
-  /**
    * Removes request from the active request list
-   * @param request Request to be removed
+   * @param {ProtoRequest} request Request to be removed
+   * @private
    */
-  private removeActiveRequest(request: UntypedProtoRequest) {
+  private removeActiveRequest(request: UntypedProtoRequest): void {
     const index = this.activeRequests.indexOf(request);
 
     if (index > -1) {

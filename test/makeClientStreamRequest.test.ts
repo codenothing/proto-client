@@ -1,19 +1,20 @@
 import { sendUnaryData, ServerReadableStream, status } from "@grpc/grpc-js";
-import { RequestError, ProtoRequest, StreamWriter } from "../src";
+import { StreamWriter } from "../src";
 import {
   Customer,
   CustomersResponse,
   getClient,
+  getClientStreamRequest,
   makeClientStreamRequest,
   startServer,
   wait,
 } from "./utils";
 import { MockServiceError } from "./MockServiceError";
+import { Readable } from "stream";
 
 describe("makeClientStreamRequest", () => {
   let RESPONSE_DELAY: number;
   let THROW_ERROR_RESPONSE: boolean;
-  let activeRequest: ProtoRequest<Customer, CustomersResponse>;
 
   beforeEach(async () => {
     THROW_ERROR_RESPONSE = false;
@@ -30,7 +31,7 @@ describe("makeClientStreamRequest", () => {
       (customer) => (CUSTOMERS_HASH[customer.id as string] = customer)
     );
 
-    const { client } = await startServer({
+    await startServer({
       EditCustomer: (
         call: ServerReadableStream<Customer, CustomersResponse>,
         callback: sendUnaryData<CustomersResponse>
@@ -70,10 +71,6 @@ describe("makeClientStreamRequest", () => {
         });
       },
     });
-
-    client.useMiddleware(async (req) => {
-      activeRequest = req;
-    });
   });
 
   test("should successfully request against the EditCustomer method", async () => {
@@ -111,68 +108,90 @@ describe("makeClientStreamRequest", () => {
     });
   });
 
-  test("should ignore first try failure if the retry is successful", async () => {
-    RESPONSE_DELAY = 1000;
-    return new Promise<void>((resolve, reject) => {
-      makeClientStreamRequest(
-        async (write) => {
-          await write({
-            id: "github",
-            name: "Github 2000",
-          });
+  test("should handle readable stream passed instead of writer sandbox", async () => {
+    const { result } = await makeClientStreamRequest(
+      Readable.from([
+        { id: "github", name: "Github 2000" },
+        { id: "npm", name: "NPM 2000" },
+      ])
+    );
 
-          await write({
-            id: "npm",
-            name: "NPM 2000",
-          });
+    expect(result).toEqual({
+      customers: [
+        {
+          id: "github",
+          name: "Github 2000",
         },
-        { timeout: 200, retryOptions: true }
-      )
-        .then((request) => {
-          try {
-            expect(request.result).toEqual({
-              customers: [
-                {
-                  id: "github",
-                  name: "Github 2000",
-                },
-                {
-                  id: "npm",
-                  name: "NPM 2000",
-                },
-              ],
-            });
-            expect(request.error).toBeUndefined();
-            expect(request.responseErrors).toEqual([
-              expect.objectContaining({ code: status.DEADLINE_EXCEEDED }),
-            ]);
-            resolve();
-          } catch (e) {
-            reject(e);
-          }
-        })
-        .catch(reject);
-
-      setTimeout(() => (RESPONSE_DELAY = 0), 100);
+        {
+          id: "npm",
+          name: "NPM 2000",
+        },
+      ],
     });
   });
 
+  test("should handle no writer sandbox passed (no data sent to server)", async () => {
+    const { result, error } = await makeClientStreamRequest();
+
+    expect(result).toEqual({});
+    expect(error).toBeUndefined();
+  });
+
+  test("should ignore first try failure if the retry is successful", async () => {
+    RESPONSE_DELAY = 1000;
+    const request = getClientStreamRequest(
+      async (write) => {
+        await write({
+          id: "github",
+          name: "Github 2000",
+        });
+
+        await write({
+          id: "npm",
+          name: "NPM 2000",
+        });
+      },
+      { timeout: 200, retryOptions: true }
+    );
+
+    await wait(100);
+    RESPONSE_DELAY = 0;
+
+    await request.waitForEnd();
+    expect(request.result).toEqual({
+      customers: [
+        {
+          id: "github",
+          name: "Github 2000",
+        },
+        {
+          id: "npm",
+          name: "NPM 2000",
+        },
+      ],
+    });
+    expect(request.error).toBeUndefined();
+    expect(request.responseErrors).toEqual([
+      expect.objectContaining({ code: status.DEADLINE_EXCEEDED }),
+    ]);
+  });
+
   test("should propagate write errors", async () => {
-    await expect(
-      makeClientStreamRequest(async () => {
-        await wait(50);
-        throw new Error(`Some Mock Write Sandbox Error`);
-      })
-    ).rejects.toThrow(`Some Mock Write Sandbox Error`);
+    const { error } = await makeClientStreamRequest(async () => {
+      await wait(50);
+      throw new Error(`Some Mock Write Sandbox Error`);
+    });
+
+    expect(error?.message).toStrictEqual(`Some Mock Write Sandbox Error`);
   });
 
   test("should propagate invalid write data errors", async () => {
-    await expect(
-      makeClientStreamRequest(async (write) => {
-        await wait(50);
-        await write({ id: 1234 } as never);
-      })
-    ).rejects.toThrow(`id: string expected`);
+    const { error } = await makeClientStreamRequest(async (write) => {
+      await wait(50);
+      await write({ id: 1234 } as never);
+    });
+
+    expect(error?.message).toStrictEqual(`id: string expected`);
   });
 
   test("should throw error when trying to write on a closed sandbox", async () => {
@@ -198,48 +217,51 @@ describe("makeClientStreamRequest", () => {
 
   test("should propagate timeout errors", async () => {
     RESPONSE_DELAY = 1000;
-    await expect(
-      makeClientStreamRequest(
-        async (write) => {
-          await write({
-            id: "github",
-            name: "meow",
-          });
-        },
-        { timeout: 100 }
-      )
-    ).rejects.toThrow(
+    const { error } = await makeClientStreamRequest(
+      async (write) => {
+        await write({
+          id: "github",
+          name: "meow",
+        });
+      },
+      { timeout: 100 }
+    );
+
+    expect(error?.message).toEqual(
       `makeClientStreamRequest for 'customers.Customers.EditCustomer' timed out`
     );
   });
 
   test("should handle service errors", async () => {
     THROW_ERROR_RESPONSE = true;
-    await expect(
-      makeClientStreamRequest(async (write) => {
-        await write({
-          id: "github",
-          name: "meow",
-        });
-      })
-    ).rejects.toThrow(`13 INTERNAL: Generic Service Error`);
+    const { error } = await makeClientStreamRequest(async (write) => {
+      await write({
+        id: "github",
+        name: "meow",
+      });
+    });
+
+    expect(error?.message).toEqual(`13 INTERNAL: Generic Service Error`);
   });
 
   test("should ignore aborted requests", async () => {
     RESPONSE_DELAY = 1000;
+    const abortController = new AbortController();
+    const request = getClientStreamRequest(async (write) => {
+      await write({
+        id: "github",
+        name: "meow",
+      });
+    }, abortController);
+
     return new Promise<void>((resolve, reject) => {
-      const abortController = new AbortController();
-      makeClientStreamRequest(async (write) => {
-        await write({
-          id: "github",
-          name: "meow",
-        });
-      }, abortController)
+      request
+        .waitForEnd()
         .then(() => reject(new Error(`Should not have a successful return`)))
         .catch(() => reject(new Error(`Should not reject`)));
 
       setTimeout(() => {
-        activeRequest.on("aborted", () => resolve());
+        request.on("aborted", () => resolve());
         abortController.abort();
       }, 100);
     });
@@ -248,28 +270,19 @@ describe("makeClientStreamRequest", () => {
   test("should propagate aborted error when configured too", async () => {
     RESPONSE_DELAY = 1000;
     getClient().clientSettings.rejectOnAbort = true;
-    return new Promise<void>((resolve, reject) => {
-      const abortController = new AbortController();
-      makeClientStreamRequest(async (write) => {
-        await write({
-          id: "github",
-          name: "meow",
-        });
-      }, abortController)
-        .then(() => reject(new Error(`Should not have a successful return`)))
-        .catch((e) => {
-          try {
-            expect(e).toBeInstanceOf(RequestError);
-            expect((e as RequestError).details).toStrictEqual(
-              `Cancelled makeClientStreamRequest for 'customers.Customers.EditCustomer'`
-            );
-            resolve();
-          } catch (matchError) {
-            reject(matchError);
-          }
-        });
+    const abortController = new AbortController();
+    const request = getClientStreamRequest(async (write) => {
+      await write({
+        id: "github",
+        name: "meow",
+      });
+    }, abortController);
 
-      setTimeout(() => abortController.abort(), 100);
-    });
+    await wait(100);
+    abortController.abort();
+
+    await expect(request.waitForEnd()).rejects.toThrow(
+      `Cancelled makeClientStreamRequest for 'customers.Customers.EditCustomer'`
+    );
   });
 });

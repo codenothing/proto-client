@@ -8,10 +8,12 @@ const client = new ProtoClient({
   protoSettings: { files: ["protos/v1/customers.proto"] },
 });
 
-const { result } = await client.makeUnaryRequest("v1.Customers.GetCustomer", {
-  id: "github",
-});
+const { result, error } = await client.makeUnaryRequest(
+  "v1.Customers.GetCustomer",
+  { id: "github" }
+);
 result; // Github Customer
+error; // Any error that may have occurred during the request
 ```
 
 Reading data from a streamed response can be done by adding a read iterator
@@ -54,6 +56,22 @@ await client.makeBidiStreamRequest(
 );
 ```
 
+Requests can also be piped into other request streams
+
+```ts
+const request = client.getServerStreamRequest("v1.Customers.FindCustomers", {
+  name: "git*",
+});
+
+await client.makeBidiStreamRequest(
+  "v1.Customers.CreateCustomers",
+  request,
+  async (row) => {
+    row; // Incoming response row chunk
+  }
+);
+```
+
 ## Middleware
 
 The `ProtoClient` instance provides middleware injection to adjust requests before they are sent. A great use case would be adding authentication tokens to the request metadata in one location rather than at each line of code a request is made
@@ -88,12 +106,14 @@ client.useMiddleware((request) => {
 ### List of Events
 
 - **ProtoRequest**:
+  - `data`: Event emitted each time a response is received from the server (once for unary responses, every chunk for streamed responses)
   - `response`: Event emitted right before the first response is sent to the caller
   - `retry`: Event emitted right before a retry request is started
   - `aborted`: Event emitted when the request has been aborted
+  - `error`: Event emitted when the request resolves with an error
   - `end`: Event emitted after the last response (or error) has been returned to the caller
 - **ProtoClient**:
-  - `request`: Event emitted before a request is started, but after all middleware has run. (_will not emit if middleware throws an error_)
+  - `request`: Event emitted at creation of a request (before middleware is run)
 
 ## Multi Service Support
 

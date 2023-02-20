@@ -15,23 +15,55 @@ import type { ProtoClient } from "./ProtoClient";
 import { RequestError } from "./RequestError";
 import { DEFAULT_RETRY_STATUS_CODES, RequestMethodType } from "./constants";
 import type {
-  RequestOptions,
+  GenericRequestParams,
   RequestRetryOptions,
   StreamReader,
   StreamWriterSandbox,
 } from "./interfaces";
 import { normalizeRetryOptions } from "./util";
 import { promisify } from "util";
+import type { Readable } from "stream";
 
 // Shortcut types to proto functional parameters
 type VerifyArgs = Parameters<typeof Protobuf.Message.verify>;
 type CreateArgs = Parameters<typeof Protobuf.Message.create>;
 
 /**
+ * Internal reason for resolving request
+ */
+const enum ResolutionType {
+  Default,
+  Timeout,
+  Abort,
+}
+
+/**
+ * Add internal options to external request params
+ */
+interface ProtoRequestProps<RequestType, ResponseType>
+  extends GenericRequestParams<RequestType, ResponseType> {
+  /**
+   * ProtoClient tied to the request
+   */
+  client: ProtoClient;
+  /**
+   * For testing purposes only, block starting of the proto request
+   */
+  blockAutoStart?: true;
+}
+
+/**
  * Custom event typings
  */
 export interface ProtoRequest<RequestType, ResponseType> {
   on(
+    event: "data",
+    listener: (
+      data: ResponseType,
+      request: ProtoRequest<RequestType, ResponseType>
+    ) => void
+  ): this;
+  on(
     event: "response",
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
   ): this;
@@ -44,10 +76,55 @@ export interface ProtoRequest<RequestType, ResponseType> {
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
   ): this;
   on(
+    event: "error",
+    listener: (
+      error: Error,
+      request: ProtoRequest<RequestType, ResponseType>
+    ) => void
+  ): this;
+  on(
     event: "end",
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
   ): this;
 
+  once(
+    event: "data",
+    listener: (
+      data: ResponseType,
+      request: ProtoRequest<RequestType, ResponseType>
+    ) => void
+  ): this;
+  once(
+    event: "response",
+    listener: (request: ProtoRequest<RequestType, ResponseType>) => void
+  ): this;
+  once(
+    event: "retry",
+    listener: (request: ProtoRequest<RequestType, ResponseType>) => void
+  ): this;
+  once(
+    event: "aborted",
+    listener: (request: ProtoRequest<RequestType, ResponseType>) => void
+  ): this;
+  once(
+    event: "error",
+    listener: (
+      error: Error,
+      request: ProtoRequest<RequestType, ResponseType>
+    ) => void
+  ): this;
+  once(
+    event: "end",
+    listener: (request: ProtoRequest<RequestType, ResponseType>) => void
+  ): this;
+
+  off(
+    event: "data",
+    listener: (
+      data: ResponseType,
+      request: ProtoRequest<RequestType, ResponseType>
+    ) => void
+  ): this;
   off(
     event: "response",
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
@@ -61,10 +138,22 @@ export interface ProtoRequest<RequestType, ResponseType> {
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
   ): this;
   off(
+    event: "error",
+    listener: (
+      error: Error,
+      request: ProtoRequest<RequestType, ResponseType>
+    ) => void
+  ): this;
+  off(
     event: "end",
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
   ): this;
 
+  emit(
+    event: "data",
+    data: ResponseType,
+    request: ProtoRequest<RequestType, ResponseType>
+  ): this;
   emit(
     eventName: "response",
     request: ProtoRequest<RequestType, ResponseType>
@@ -75,6 +164,11 @@ export interface ProtoRequest<RequestType, ResponseType> {
   ): boolean;
   emit(
     eventName: "aborted",
+    request: ProtoRequest<RequestType, ResponseType>
+  ): boolean;
+  emit(
+    eventName: "error",
+    error: Error,
     request: ProtoRequest<RequestType, ResponseType>
   ): boolean;
   emit(
@@ -89,117 +183,238 @@ export interface ProtoRequest<RequestType, ResponseType> {
 export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   /**
    * Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   * @type {string}
+   * @readonly
    */
   public readonly method: string;
 
   /**
    * Generated request path
+   * @type {string}
+   * @readonly
    */
   public readonly requestPath: string;
 
   /**
    * Request proto message type
+   * @type {Protobuf.Method}
+   * @readonly
+   */
+  public readonly serviceMethod: Protobuf.Method;
+
+  /**
+   * Request proto message type
+   * @type {Protobuf.Type}
+   * @readonly
    */
   public readonly requestType: Protobuf.Type;
 
   /**
    * Response proto message type
+   * @type {Protobuf.Type}
+   * @readonly
    */
   public readonly responseType: Protobuf.Type;
 
   /**
    * Request method type
+   * @type {RequestMethodType}
+   * @readonly
    */
   public readonly requestMethodType: RequestMethodType;
 
   /**
-   * Time in milliseconds before cancelling the request
+   * Request method type
+   * @type {boolean}
+   * @readonly
    */
-  public timeout: number;
+  public readonly isRequestStream: boolean;
+
+  /**
+   * Request method type
+   * @type {boolean}
+   * @readonly
+   */
+  public readonly isResponseStream: boolean;
+
+  /**
+   * Data sent for unary requests
+   * @type {RequestType | undefined}
+   * @readonly
+   */
+  public readonly requestData?: RequestType;
+
+  /**
+   * Pipes data from a stream to the request stream
+   * @type {EventEmitter | Readable | undefined}
+   * @readonly
+   */
+  public readonly pipeStream?: EventEmitter | Readable;
+
+  /**
+   * Writer sandbox for request streams
+   * @type {StreamWriterSandbox | undefined}
+   * @readonly
+   */
+  public readonly writerSandbox?: StreamWriterSandbox<
+    RequestType,
+    ResponseType
+  >;
+
+  /**
+   * Read iterator for response streams
+   * @type {StreamReader | undefined}
+   * @readonly
+   */
+  public readonly streamReader?: StreamReader<RequestType, ResponseType>;
+
+  /**
+   * Time in milliseconds before cancelling the request
+   * @type {number}
+   * @readonly
+   */
+  public readonly timeout: number;
 
   /**
    * Configured retry options for this request
+   * @type {RequestRetryOptions}
+   * @readonly
    */
-  public retryOptions: RequestRetryOptions;
+  public readonly retryOptions: RequestRetryOptions;
 
   /**
    * AbortController tied to the request
+   * @type {AbortController}
+   * @readonly
    */
-  public abortController: AbortController;
+  public readonly abortController: AbortController;
 
   /**
    * Metadata instance for the request
+   * @type {Metadata}
+   * @readonly
    */
-  public metadata: Metadata;
+  public readonly metadata: Metadata;
 
   /**
    * Request specific options
+   * @type {CallOptions}
+   * @readonly
    */
-  public callOptions: CallOptions;
+  public readonly callOptions: CallOptions;
 
   /**
    * Data response from the service, only valid for unary and client stream requests
+   * @type {ResponseType}
    */
   public result?: ResponseType;
 
   /**
    * Metadata returned from the service
+   * @type {Metadata | undefined}
    */
   public responseMetadata?: Metadata;
 
   /**
    * Metadata returned from the service
+   * @type {StatusObject | undefined}
    */
   public responseStatus?: StatusObject;
 
   /**
    * Number of retries made for this request
+   * @type {number}
    */
   public retries = 0;
 
   /**
-   * References any error that may have occured during the request
+   * References any error that may have occurred during the request
+   * @type {Error}
    */
   public error?: Error;
 
   /**
    * When retries are enabled, all errors will be stored here
+   * @type {Error[]}
+   * @readonly
    */
   public readonly responseErrors: Error[] = [];
 
   /**
    * Internal reference to the parent client instance
+   * @type {ProtoClient}
+   * @readonly
+   * @private
    */
   private readonly client: ProtoClient;
 
   /**
-   * Internal reference to determine if request has start yet or not
+   * End promise queue while request is active
+   * @type {Promise[]}
+   * @private
    */
-  private hasRequestBegun = false;
+  private endPromiseQueue: Array<{
+    resolve: (request: ProtoRequest<RequestType, ResponseType>) => void;
+    reject: (error: Error) => void;
+  }> = [];
 
   /**
    * Reference to the called stream from within the method
+   * @type {ClientUnaryCall | ClientReadableStream | ClientWritableStream | ClientDuplexStream | null}
+   * @private
    */
   private stream:
+    | ClientUnaryCall
     | ClientReadableStream<ResponseType>
     | ClientWritableStream<RequestType>
     | ClientDuplexStream<RequestType, ResponseType>
     | null = null;
 
   /**
-   * Internal class for managing individual requests
+   * Request timeout ID reference
+   * @type {NodeJS.Timeout | undefined}
+   * @private
    */
-  constructor(
-    client: ProtoClient,
-    method: string,
-    requestMethodType: RequestMethodType,
-    requestOptions: AbortController | RequestOptions | undefined
-  ) {
+  private requestTimerId?: NodeJS.Timeout;
+
+  /**
+   * Internal reference to tracking activity of the request
+   * @type {boolean}
+   * @private
+   */
+  private isRequestActive = true;
+
+  /**
+   * Internal representation of how the request was resolved
+   * @type {ResolutionType | undefined}
+   * @private
+   */
+  private resolutionType?: ResolutionType;
+
+  /**
+   * Internal class for managing individual requests
+   * @package
+   * @private
+   */
+  constructor({
+    client,
+    method,
+    requestMethodType,
+    data,
+    pipeStream,
+    writerSandbox,
+    streamReader,
+    requestOptions,
+    blockAutoStart,
+  }: ProtoRequestProps<RequestType, ResponseType>) {
     super();
 
     this.method = method;
     this.client = client;
-    this.requestMethodType = requestMethodType;
+    this.requestData = data;
+    this.pipeStream = pipeStream;
+    this.writerSandbox = writerSandbox;
+    this.streamReader = streamReader;
 
     // Break down the method to configure the path
     const methodParts = this.method.split(/\./g);
@@ -209,33 +424,44 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
     // Validate service method exists
     const service = this.client.getRoot().lookupService(serviceName);
-    const serviceMethod = service.methods[methodName as string];
-    if (!serviceMethod) {
+    this.serviceMethod = service.methods[methodName as string];
+    if (!this.serviceMethod) {
       throw new Error(`Method ${methodName} not found on ${serviceName}`);
     }
 
+    // Mark stream types
+    this.isRequestStream = !!this.serviceMethod.requestStream;
+    this.isResponseStream = !!this.serviceMethod.responseStream;
+
     // Validate service method matches called function
     const expectedMethod =
-      serviceMethod.requestStream && serviceMethod.responseStream
+      this.serviceMethod.requestStream && this.serviceMethod.responseStream
         ? RequestMethodType.BidiStreamRequest
-        : serviceMethod.requestStream
+        : this.serviceMethod.requestStream
         ? RequestMethodType.ClientStreamRequest
-        : serviceMethod.responseStream
+        : this.serviceMethod.responseStream
         ? RequestMethodType.ServerStreamRequest
         : RequestMethodType.UnaryRequest;
-    if (expectedMethod !== requestMethodType) {
-      throw new Error(
-        `${requestMethodType} does not support method '${this.method}', use ${expectedMethod} instead`
-      );
+
+    // Only throw on expected method mismatch when defined
+    if (requestMethodType) {
+      this.requestMethodType = requestMethodType;
+      if (expectedMethod !== requestMethodType) {
+        throw new Error(
+          `${requestMethodType} does not support method '${this.method}', use ${expectedMethod} instead`
+        );
+      }
+    } else {
+      this.requestMethodType = expectedMethod;
     }
 
     // Assign the request and response types
     this.requestType = this.client
       .getRoot()
-      .lookupType(serviceMethod.requestType);
+      .lookupType(this.serviceMethod.requestType);
     this.responseType = this.client
       .getRoot()
-      .lookupType(serviceMethod.responseType);
+      .lookupType(this.serviceMethod.responseType);
 
     // Use default request options
     if (!requestOptions) {
@@ -246,16 +472,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       this.retryOptions =
         normalizeRetryOptions(this.client.clientSettings.retryOptions) || {};
     }
-    // Only abort controller
-    else if (requestOptions instanceof AbortController) {
-      this.abortController = requestOptions;
-      this.metadata = new Metadata();
-      this.callOptions = {};
-      this.timeout = this.client.clientSettings.timeout || 0;
-      this.retryOptions =
-        normalizeRetryOptions(this.client.clientSettings.retryOptions) || {};
-    }
-    // Full options assignemnt
+    // Full options assignment
     else {
       this.abortController =
         requestOptions.abortController || new AbortController();
@@ -293,133 +510,178 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
         this.metadata = new Metadata();
       }
     }
+
+    // For internal testing only, allow auto starting of the request
+    if (blockAutoStart !== true) {
+      this.start();
+    }
   }
 
   /**
    * Indicates if the request is active (started, but not finished)
-   *
-   * Note*: For middleware, this will be false until all middleware
-   * completes and the request begins
+   * @type {boolean}
+   * @readonly
    */
   public get isActive(): boolean {
-    return this.hasRequestBegun && !this.error && !this.responseStatus;
+    return this.isRequestActive;
   }
 
   /**
    * Indicates if data can still be sent to the write stream
+   * @type {boolean}
+   * @readonly
    */
   public get isWritable(): boolean {
-    const stream = this.stream as ClientWritableStream<RequestType> | null;
-    return !!stream?.writable;
+    return !!this.writeStream?.writable;
   }
 
   /**
    * Indicates if the data is still coming from the read stream
+   * @type {boolean}
+   * @readonly
    */
   public get isReadable(): boolean {
-    const stream = this.stream as ClientReadableStream<ResponseType> | null;
-    return !!stream?.readable;
+    return !!this.readStream?.readable;
   }
-  
+
   /**
    * Proxy to the trailing metadata returned at the end of the response
+   * @type {Metadata | undefined}
+   * @readonly
    */
   public get trailingMetadata(): Metadata | undefined {
     return this.responseStatus?.metadata;
   }
 
   /**
-   * Sends unary (request/response) request to the service endpoint
-   * @param data Data to be sent as part of the request. Defaults to empty object
+   * Safety wrapper for typing stream as writable
+   * @type {ClientWritableStream | ClientDuplexStream | undefined}
+   * @readonly
+   * @private
    */
-  public async makeUnaryRequest(data?: RequestType | null): Promise<this> {
-    return this.retryWrapper((timeout, completed) => {
-      // Data sanitation
-      const validationError = this.requestType.verify(data || {});
-      if (validationError) {
-        this.error = new RequestError(
-          status.INVALID_ARGUMENT,
-          this,
-          validationError
+  private get writeStream():
+    | ClientWritableStream<RequestType>
+    | ClientDuplexStream<RequestType, ResponseType>
+    | undefined {
+    if (this.isRequestStream && this.stream) {
+      return this.stream as
+        | ClientWritableStream<RequestType>
+        | ClientDuplexStream<RequestType, ResponseType>;
+    }
+  }
+
+  /**
+   * Safety wrapper for typing stream as readable
+   * @type {ClientReadableStream | ClientDuplexStream | undefined}
+   * @readonly
+   * @private
+   */
+  private get readStream():
+    | ClientReadableStream<ResponseType>
+    | ClientDuplexStream<RequestType, ResponseType>
+    | undefined {
+    if (this.isResponseStream && this.stream) {
+      return this.stream as
+        | ClientReadableStream<ResponseType>
+        | ClientDuplexStream<RequestType, ResponseType>;
+    }
+  }
+
+  /**
+   * Kicks off the request, adds abort listener and runs middleware
+   * @private
+   */
+  private start() {
+    // Listen for caller aborting of this request
+    this.abortController.signal.addEventListener("abort", () => {
+      if (this.stream) {
+        this.stream.cancel();
+        this.resolveRequest(
+          ResolutionType.Abort,
+          new RequestError(status.CANCELLED, this)
         );
-        completed(this.error);
-        return;
       }
+    });
 
-      // Local references for this cycle
-      let call: ClientUnaryCall | null = null;
-      let finished = false;
+    // Run middleware before entering request loop
+    this.runMiddleware()
+      .then(this.makeRequest.bind(this))
+      .catch((e) => {
+        let error: Error;
 
-      // Make the actual requests
-      call = this.client
+        if (e instanceof Error) {
+          error = e;
+        } else if (typeof e === "string") {
+          error = new Error(e);
+        } else {
+          error = new Error(`Unknown Middleware Error`, { cause: e });
+        }
+
+        this.resolveRequest(ResolutionType.Default, error);
+      });
+  }
+
+  /**
+   * Runs any middleware attached to the client
+   */
+  private async runMiddleware() {
+    for (const middleware of this.client.middleware) {
+      if (this.isActive) {
+        await middleware(this, this.client);
+      }
+    }
+  }
+
+  /**
+   * Retry-able requester starter method that sets up the
+   * call stream with readers & writers
+   * @private
+   */
+  private makeRequest(): void {
+    this.stream = null;
+    this.resolutionType = undefined;
+    this.error = undefined;
+    this.responseMetadata = undefined;
+    this.responseStatus = undefined;
+
+    // Data sanitation
+    if (!this.isRequestStream && this.requestData) {
+      const validationError = this.requestType.verify(this.requestData);
+      if (validationError) {
+        return this.resolveRequest(
+          ResolutionType.Default,
+          new RequestError(status.INVALID_ARGUMENT, this, validationError)
+        );
+      }
+    }
+
+    // Setup client timeout
+    if (this.timeout) {
+      this.requestTimerId = setTimeout(() => {
+        this.resolveRequest(
+          ResolutionType.Timeout,
+          new RequestError(status.DEADLINE_EXCEEDED, this)
+        );
+      }, this.timeout);
+    }
+
+    // Unary Request
+    if (this.requestMethodType === RequestMethodType.UnaryRequest) {
+      this.stream = this.client
         .getClient(this)
         .makeUnaryRequest<RequestType, ResponseType>(
           this.requestPath,
           this.serializeRequest.bind(this),
           this.deserializeResponse.bind(this),
-          (data || {}) as RequestType,
+          (this.requestData || {}) as RequestType,
           this.metadata,
           this.callOptions,
-          (e, result) => {
-            if (finished) {
-              return;
-            }
-
-            // Assign results and signal out the response
-            this.error = e || undefined;
-            this.result = result;
-            this.emit("response", this);
-
-            // Mark request as completed
-            finished = true;
-            call = null;
-            completed(e);
-          }
+          this.unaryCallback.bind(this, this.retries)
         );
-
-      // Bind response Metadata and Status to the request object
-      call.on("metadata", (metadata) => (this.responseMetadata = metadata));
-      call.on("status", (status) => (this.responseStatus = status));
-
-      // Cancel the open request when timeout threashold is reached
-      timeout(() => {
-        call?.cancel();
-        call = null;
-        finished = true;
-      });
-
-      // Listen for caller aborting of this request
-      this.abortController.signal.addEventListener("abort", () => {
-        if (call) {
-          call.cancel();
-          call = null;
-          finished = true;
-          this.error = new RequestError(status.CANCELLED, this);
-
-          if (this.client.clientSettings.rejectOnAbort) {
-            completed(this.error);
-          }
-
-          this.emit("aborted", this);
-        }
-      });
-
-      this.client.emit("request", this);
-    });
-  }
-
-  /**
-   * Sends client stream (request stream, single response) request to the service endpoint
-   * @param writerSandbox Async supported callback for writing data to the open stream
-   */
-  public async makeClientStreamRequest(
-    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>
-  ): Promise<this> {
-    return this.retryWrapper((timeout, completed) => {
-      let stream: ClientWritableStream<RequestType> | null = null;
-      let finished = false;
-
-      stream = this.stream = this.client
+    }
+    // Client Stream Request
+    else if (this.requestMethodType === RequestMethodType.ClientStreamRequest) {
+      this.stream = this.client
         .getClient(this)
         .makeClientStreamRequest<RequestType, ResponseType>(
           this.requestPath,
@@ -427,238 +689,25 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           this.deserializeResponse.bind(this),
           this.metadata,
           this.callOptions,
-          (e, result) => {
-            if (finished) {
-              return;
-            }
-
-            // Assign the results and signal response received
-            this.error = e || undefined;
-            this.result = result;
-            this.emit("response", this);
-
-            // Mark request as completed
-            finished = true;
-            stream = null;
-            completed(e);
-          }
+          this.unaryCallback.bind(this, this.retries)
         );
-
-      // Bind response Metadata and Status to the request object
-      stream.on("metadata", (metadata) => (this.responseMetadata = metadata));
-      stream.on("status", (status) => (this.responseStatus = status));
-
-      // Cancel the open request when timeout threashold is reached
-      timeout(() => {
-        stream?.cancel();
-        stream = this.stream = null;
-        finished = true;
-      });
-
-      // Listen for caller aborting of this request
-      this.abortController.signal.addEventListener("abort", () => {
-        stream?.cancel();
-        stream = this.stream = null;
-        finished = true;
-        this.error = new RequestError(status.CANCELLED, this);
-
-        if (this.client.clientSettings.rejectOnAbort) {
-          completed(this.error);
-        }
-
-        this.emit("aborted", this);
-      });
-
-      // Let the caller start safely writing to the stream
-      writerSandbox(async (data: RequestType, encoding?: string) => {
-        if (!stream || !this.isWritable) {
-          throw new Error(
-            `The write stream has already closed for ${this.method}`
-          );
-        }
-
-        // Validate the message
-        const validationError = this.requestType.verify(data as VerifyArgs[0]);
-        if (validationError) {
-          throw new RequestError(
-            status.INVALID_ARGUMENT,
-            this,
-            validationError
-          );
-        }
-
-        // Write message to the stream, waiting for the callback
-        // to return before resolving write
-        await promisify(stream.write.bind(stream, data, encoding))();
-      }, this)
-        .then(() => stream?.end())
-        .catch((e) => {
-          if (stream) {
-            stream?.cancel();
-            stream = this.stream = null;
-            finished = true;
-            this.error = e;
-            completed(e);
-          }
-        });
-
-      this.client.emit("request", this);
-    });
-  }
-
-  /**
-   * Sends a server stream (single request, streamed response) request to the service endpoint
-   * @param data Data to be sent as part of the request
-   * @param streamReader Iteration function that will get called on every response chunk
-   */
-  public async makeServerStreamRequest(
-    data: RequestType | StreamReader<RequestType, ResponseType>,
-    streamReader?: StreamReader<RequestType, ResponseType>
-  ): Promise<this> {
-    return this.retryWrapper((timeout, completed) => {
-      if (typeof data === "function") {
-        streamReader = data as StreamReader<RequestType, ResponseType>;
-        data = {} as RequestType;
-      }
-
-      if (!streamReader) {
-        this.error = new RequestError(
-          status.INVALID_ARGUMENT,
-          this,
-          `streamReader not found`
-        );
-        return completed(this.error);
-      }
-
-      // Data sanitation
-      const validationError = this.requestType.verify(data || {});
-      if (validationError) {
-        this.error = new RequestError(
-          status.INVALID_ARGUMENT,
-          this,
-          validationError
-        );
-        return completed(this.error);
-      }
-
-      let counter = 0;
-      let responseRowIndex = 0;
-      let finished = false;
-      let stream: ClientReadableStream<ResponseType> | null;
-
-      stream = this.stream = this.client
+    }
+    // Server Stream Request
+    else if (this.requestMethodType === RequestMethodType.ServerStreamRequest) {
+      this.stream = this.client
         .getClient(this)
         .makeServerStreamRequest<RequestType, ResponseType>(
           this.requestPath,
           this.serializeRequest.bind(this),
           this.deserializeResponse.bind(this),
-          (data || {}) as RequestType,
+          (this.requestData || {}) as RequestType,
           this.metadata,
           this.callOptions
         );
-
-      // Cancel the open request when timeout threashold is reached
-      timeout(() => {
-        stream?.cancel();
-        stream = this.stream = null;
-      });
-
-      // Let the caller start safely writing to the stream
-      this.abortController.signal.addEventListener("abort", () => {
-        if (stream) {
-          stream.cancel();
-          stream = this.stream = null;
-          this.error = new RequestError(status.CANCELLED, this);
-
-          if (this.client.clientSettings.rejectOnAbort) {
-            completed(this.error);
-          }
-
-          this.emit("aborted", this);
-        }
-      });
-
-      // Bind response Metadata and Status to the request object
-      stream.on("metadata", (metadata) => (this.responseMetadata = metadata));
-      stream.on("status", (status) => (this.responseStatus = status));
-
-      /**
-       * Proxy each chunk of data from the service to the streamReader
-       *
-       * Request is not resolved until all streamReader operations
-       * have completed
-       */
-      stream.on("data", (row: ResponseType) => {
-        if (stream) {
-          if (responseRowIndex === 0) {
-            this.emit("response", this);
-          }
-
-          counter++;
-          (streamReader as StreamReader<RequestType, ResponseType>)(
-            row,
-            responseRowIndex++,
-            this
-          )
-            .then(() => {
-              if (--counter < 1 && stream && finished) {
-                stream = this.stream = null;
-                completed();
-              }
-            })
-            // Bubble any stream reader errors back to the caller
-            .catch((e) => {
-              if (stream) {
-                stream.cancel();
-                stream = this.stream = null;
-
-                this.error = e;
-                completed(e);
-              }
-            });
-        }
-      });
-
-      // End event should trigger closure of request as long
-      // as all stream reader operations are complete
-      stream.on("end", () => {
-        finished = true;
-
-        if (stream && counter < 1) {
-          stream = this.stream = null;
-          completed();
-        }
-      });
-
-      // Any service error should kill the stream
-      stream.on("error", (e) => {
-        if (stream) {
-          stream = this.stream = null;
-          this.error = e;
-          completed(e);
-        }
-      });
-
-      this.client.emit("request", this);
-    });
-  }
-
-  /**
-   * Sends a bi-directional (stream request, stream response) request to the service endpoint
-   * @param writerSandbox Async supported callback for writing data to the open stream
-   * @param streamReader Iteration function that will get called on every response chunk
-   */
-  public async makeBidiStreamRequest(
-    writerSandbox: StreamWriterSandbox<RequestType, ResponseType>,
-    streamReader: StreamReader<RequestType, ResponseType>
-  ): Promise<this> {
-    return this.retryWrapper((timeout, completed) => {
-      let counter = 0;
-      let responseRowIndex = 0;
-      let finished = false;
-      let stream: ClientDuplexStream<RequestType, ResponseType> | null;
-
-      stream = this.stream = this.client
+    }
+    // Bidirectional Stream Request
+    else {
+      this.stream = this.client
         .getClient(this)
         .makeBidiStreamRequest(
           this.requestPath,
@@ -667,121 +716,347 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           this.metadata,
           this.callOptions
         );
+    }
 
-      // Cancel the open request when timeout threashold is reached
-      timeout(() => {
-        stream?.cancel();
-        stream = this.stream = null;
-      });
+    // Bind response Metadata and Status to the request object
+    this.stream.on(
+      "metadata",
+      (metadata) => (this.responseMetadata = metadata)
+    );
+    this.stream.on("status", (status) => (this.responseStatus = status));
 
-      // Let the caller start safely writing to the stream
-      this.abortController.signal.addEventListener("abort", () => {
-        if (stream) {
-          stream.cancel();
-          stream = this.stream = null;
-          this.error = new RequestError(status.CANCELLED, this);
+    // Setup read/write stream handling
+    this.readFromServer();
+    this.proxyPipeStreamToServer();
+    this.writeToServer();
+  }
 
-          if (this.client.clientSettings.rejectOnAbort) {
-            completed(this.error);
-          }
+  /**
+   * Callback binded to unary response methods
+   * @param attempt Retry attempt number callback is binded for, to prevent old attempts from running
+   * @param error Server error, if any
+   * @param value Response data
+   * @private
+   */
+  private unaryCallback(
+    attempt: number,
+    error: ServiceError | null,
+    value?: ResponseType
+  ): void {
+    if (!this.stream || attempt !== this.retries) {
+      return;
+    }
 
-          this.emit("aborted", this);
-        }
-      });
+    this.result = value;
+    this.emit("response", this);
 
-      // Bind response Metadata and Status to the request object
-      stream.on("metadata", (metadata) => (this.responseMetadata = metadata));
-      stream.on("status", (status) => (this.responseStatus = status));
+    if (value) {
+      this.emit("data", value, this);
+    }
 
-      /**
-       * Proxy each chunk of data from the service to the streamReader
-       *
-       * Request is not resolved until all streamReader operations
-       * have completed
-       */
-      stream.on("data", (row: ResponseType) => {
-        if (!stream) {
-          return;
-        }
+    this.resolveRequest(ResolutionType.Default, error || undefined);
+  }
 
+  /**
+   * Listens for data on response streams
+   * @private
+   */
+  private readFromServer(): void {
+    const stream = this.readStream;
+    if (!this.isResponseStream || !stream) {
+      return;
+    }
+
+    // Local refs for read stream lifecycle management
+    let counter = 0;
+    let responseRowIndex = 0;
+    let finished = false;
+
+    /**
+     * Proxy each chunk of data from the service to the streamReader
+     *
+     * Request is not resolved until all streamReader operations
+     * have completed
+     */
+    stream.on("data", (row: ResponseType) => {
+      if (this.stream === stream) {
         if (responseRowIndex === 0) {
           this.emit("response", this);
         }
 
+        // Pipe to act like a readable stream
+        this.emit("data", row, this);
+
+        // Data is only piped to event emitter when stream reader is not passed
+        if (!this.streamReader) {
+          return;
+        }
+
+        // Increment counters while processing
         counter++;
-        streamReader(row, responseRowIndex++, this)
+        this.streamReader(row, responseRowIndex++, this)
           .then(() => {
-            if (--counter < 1 && stream && finished) {
-              stream = this.stream = null;
-              completed();
+            if (--counter < 1 && finished && this.stream === stream) {
+              this.resolveRequest(ResolutionType.Default);
             }
           })
           // Bubble any stream reader errors back to the caller
           .catch((e) => {
-            if (stream) {
-              stream.cancel();
-              stream = this.stream = null;
-              this.error = e;
-              completed(e);
+            if (this.stream === stream) {
+              this.stream.cancel();
+              this.resolveRequest(ResolutionType.Default, e);
             }
           });
-      });
-
-      // End event should trigger closure of request as long
-      // as all stream reader operations are complete
-      stream.on("end", () => {
-        finished = true;
-
-        if (stream && counter < 1) {
-          stream = this.stream = null;
-          completed();
-        }
-      });
-
-      // Any service error should kill the stream
-      stream.on("error", (e) => {
-        if (stream) {
-          stream.cancel();
-          stream = this.stream = null;
-          this.error = e;
-          completed(e);
-        }
-      });
-
-      // Let the caller start safely writing to the stream
-      writerSandbox(async (data: RequestType, encoding?: string) => {
-        if (!stream || !this.isWritable) {
-          throw new Error(
-            `The write stream has already closed for ${this.method}`
-          );
-        }
-
-        // Validate the message
-        const validationError = this.requestType.verify(data as VerifyArgs[0]);
-        if (validationError) {
-          throw new RequestError(
-            status.INVALID_ARGUMENT,
-            this,
-            validationError
-          );
-        }
-
-        // Write message to the stream, waiting for the callback
-        // to return before resolving write
-        await promisify(stream.write.bind(stream, data, encoding))();
-      }, this)
-        .then(() => stream?.end())
-        .catch((e) => {
-          if (stream) {
-            stream.cancel();
-            stream = this.stream = null;
-            this.error = e;
-            completed(e);
-          }
-        });
-
-      this.client.emit("request", this);
+      }
     });
+
+    // End event should trigger closure of request as long
+    // as all stream reader operations are complete
+    stream.on("end", () => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+
+      if (this.stream === stream && counter < 1) {
+        this.resolveRequest(ResolutionType.Default);
+      }
+    });
+
+    // Any service error should kill the stream
+    stream.on("error", (e) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+
+      if (this.stream === stream) {
+        this.resolveRequest(ResolutionType.Default, e);
+      }
+    });
+  }
+
+  /**
+   * Pipes a readable like stream to the request stream
+   * @private
+   */
+  private proxyPipeStreamToServer(): void {
+    const stream = this.writeStream;
+    if (!this.isRequestStream || !this.pipeStream || !stream) {
+      return;
+    }
+
+    let finished = false;
+
+    // Listen for any new incoming data
+    this.pipeStream.on("data", (row) => {
+      if (!finished && this.stream === stream) {
+        stream.write(row);
+      }
+    });
+
+    // Check for any errors on the piped stream
+    this.pipeStream.on("error", (e: unknown) => {
+      if (finished || this.stream !== stream) {
+        return;
+      }
+
+      const error =
+        e instanceof Error ? e : new Error("Pipe stream error", { cause: e });
+
+      finished = true;
+      this.stream.cancel();
+      this.resolveRequest(ResolutionType.Default, error);
+    });
+
+    // Close the request stream once the pipe stream ends
+    this.pipeStream.on("end", () => {
+      if (finished || this.stream !== stream) {
+        return;
+      }
+
+      finished = true;
+      stream.end();
+    });
+  }
+
+  /**
+   * Opens the writer sandbox if it exists for request streams
+   * @private
+   */
+  private writeToServer(): void {
+    const stream = this.writeStream;
+    if (!this.isRequestStream || !stream || this.pipeStream) {
+      return;
+    } else if (!this.writerSandbox) {
+      this.writeStream?.end();
+      return;
+    }
+
+    // Let the caller start safely writing to the stream
+    this.writerSandbox(async (data: RequestType, encoding?: string) => {
+      if (stream !== this.stream || !this.isWritable) {
+        throw new Error(
+          `The write stream has already closed for ${this.method}`
+        );
+      }
+
+      // Validate the message
+      const validationError = this.requestType.verify(data as VerifyArgs[0]);
+      if (validationError) {
+        throw new RequestError(status.INVALID_ARGUMENT, this, validationError);
+      }
+
+      // Write message to the stream, waiting for the callback
+      // to return before resolving write
+      await promisify(stream.write.bind(stream, data, encoding))();
+    }, this)
+      .then(() => {
+        if (stream === this.stream) {
+          stream.end();
+        }
+      })
+      .catch((e) => {
+        if (stream === this.stream) {
+          this.stream.cancel();
+          this.resolveRequest(ResolutionType.Default, e);
+        }
+      });
+  }
+
+  /**
+   * Marks stream as complete, resolving any queued promises
+   * @param error Any error that occurred during the request
+   * @param resolutionType Indicator for special error handling (like abort & timeout)
+   * @private
+   */
+  private resolveRequest(resolutionType: ResolutionType, error?: Error): void {
+    if (!this.isRequestActive) {
+      return;
+    }
+
+    if (this.requestTimerId) {
+      clearTimeout(this.requestTimerId);
+      this.requestTimerId = undefined;
+    }
+
+    this.stream = null;
+    this.resolutionType = resolutionType;
+
+    if (error) {
+      this.responseErrors.push(error);
+
+      // Allow for retries
+      if (this.canRetry((error as ServiceError).code, resolutionType)) {
+        this.retries++;
+        this.emit("retry", this);
+        this.makeRequest();
+      }
+      // End request with an error
+      else {
+        this.isRequestActive = false;
+        this.error = error;
+
+        // Never reject if rejectOnError is disabled
+        if (this.client.clientSettings.rejectOnError === false) {
+          this.endPromiseQueue.forEach(({ resolve }) => resolve(this));
+        }
+        // Always reject when rejectOnError is enabled
+        else if (this.client.clientSettings.rejectOnError === true) {
+          this.endPromiseQueue.forEach(({ reject }) => reject(error));
+        }
+        // Abort handling
+        else if (resolutionType === ResolutionType.Abort) {
+          // Only reject if rejectOnAbort is enabled
+          if (this.client.clientSettings.rejectOnAbort === true) {
+            this.endPromiseQueue.forEach(({ reject }) => reject(error));
+          }
+
+          this.emit("aborted", this);
+        }
+        // Resolve everything else
+        else {
+          this.endPromiseQueue.forEach(({ resolve }) => resolve(this));
+        }
+
+        this.endPromiseQueue = [];
+        this.emit("error", error, this);
+        this.emit("end", this);
+      }
+    }
+    // Successful response
+    else {
+      this.isRequestActive = false;
+      this.endPromiseQueue.forEach(({ resolve }) => resolve(this));
+      this.endPromiseQueue = [];
+      this.emit("end", this);
+    }
+  }
+
+  /**
+   * Serializing method for outgoing messages
+   * @param object Request object passed from the caller
+   * @private
+   */
+  private serializeRequest(object: RequestType): Buffer {
+    return this.requestType
+      .encode(this.requestType.create(object as CreateArgs[0]))
+      .finish() as Buffer;
+  }
+
+  /**
+   * Deserializing method for incoming messages
+   * @param buffer Buffer object response from the connection
+   * @private
+   */
+  private deserializeResponse(buffer: Buffer): ResponseType {
+    return this.responseType.toObject(
+      this.responseType.decode(buffer),
+      this.client.protoConversionOptions
+    ) as ResponseType;
+  }
+
+  /**
+   * Determines if this request can be retried on error
+   * @param code Status code of the current error
+   * @param resolutionType How the request resolved
+   * @private
+   */
+  private canRetry(
+    code: status | undefined,
+    resolutionType: ResolutionType
+  ): boolean {
+    // Request aborts can't be retried
+    if (resolutionType === ResolutionType.Abort) {
+      return false;
+    }
+    // Prevent retry timeouts if configured to skip
+    else if (
+      resolutionType === ResolutionType.Timeout &&
+      this.retryOptions.retryOnClientTimeout === false
+    ) {
+      return false;
+    }
+
+    // Check for custom retry codes, otherwise fallback to default codes
+    let approvedCodes: status[] = [];
+    if (this.retryOptions.status) {
+      approvedCodes = Array.isArray(this.retryOptions.status)
+        ? this.retryOptions.status
+        : [this.retryOptions.status];
+    } else {
+      approvedCodes = DEFAULT_RETRY_STATUS_CODES;
+    }
+
+    // Check all parameters to see if request can be retried
+    return !!(
+      !this.abortController.signal.aborted &&
+      this.retryOptions.retryCount &&
+      this.retries < this.retryOptions.retryCount &&
+      code !== undefined &&
+      approvedCodes.includes(code) &&
+      !this.pipeStream
+    );
   }
 
   /**
@@ -794,144 +1069,45 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   }
 
   /**
-   * Serializing method for outgoing messages
-   * @param object Request object passed from the caller
+   * Enhanced "end" event listener. Adds promise to a queue, waiting for the request
+   * to complete, rejecting on any failures. If the request is already complete, the
+   * result is returned (or exception raised)
+   * @returns {ProtoRequest} This ProtoRequest instance
    */
-  private serializeRequest(object: RequestType): Buffer {
-    return this.requestType
-      .encode(this.requestType.create(object as CreateArgs[0]))
-      .finish() as Buffer;
-  }
-
-  /**
-   * Deserializing method for incoming messages
-   * @param buffer Buffer object repsonse from the connection
-   */
-  private deserializeResponse(buffer: Buffer): ResponseType {
-    return this.responseType.toObject(
-      this.responseType.decode(buffer),
-      this.client.protoConversionOptions
-    ) as ResponseType;
-  }
-
-  /**
-   * Determins if this request can be retried on error
-   * @param code Status code of the current error
-   */
-  private canRetry(code?: status) {
-    let approvedCodes: status[] = [];
-
-    if (this.retryOptions.status) {
-      approvedCodes = Array.isArray(this.retryOptions.status)
-        ? this.retryOptions.status
-        : [this.retryOptions.status];
-    } else {
-      approvedCodes = DEFAULT_RETRY_STATUS_CODES;
-    }
-
-    return (
-      !this.abortController.signal.aborted &&
-      this.retryOptions.retryCount &&
-      this.retries < this.retryOptions.retryCount &&
-      code !== undefined &&
-      approvedCodes.includes(code)
-    );
-  }
-
-  /**
-   * Wraps active request calls with retry and timeout handlers
-   * @param requestRunner Request wrapper for running through retries
-   */
-  public async retryWrapper(
-    requestRunner: (
-      /**
-       * Starts the timer for timeouts, and triggers the reached callback
-       * once timer threshold has been met
-       */
-      timeout: (timeoutReached: () => void) => void,
-
-      /**
-       * Callback for when the service response has completed
-       */
-      completed: (error?: Error | ServiceError | null) => void
-    ) => void
-  ): Promise<this> {
-    if (this.hasRequestBegun) {
-      throw new Error(
-        `${this.requestMethodType} for '${this.method}' has already begun. Only make requests from the client, not the request instance`
-      );
-    }
-    this.hasRequestBegun = true;
-
-    return new Promise<this>((resolve, reject) => {
-      const makeRequest = () => {
-        let timerid: NodeJS.Timeout | null = null;
-
-        // Send off the gRPC request logic
-        requestRunner(
-          // Timeout handler
-          (timeoutReached) => {
-            if (!this.timeout) {
-              return;
-            }
-
-            timerid = setTimeout(() => {
-              timerid = null;
-              timeoutReached();
-
-              const error = new RequestError(status.DEADLINE_EXCEEDED, this);
-              this.responseErrors.push(error);
-
-              if (
-                this.canRetry(status.DEADLINE_EXCEEDED) &&
-                this.retryOptions.retryOnClientTimeout !== false
-              ) {
-                this.retries++;
-                this.emit("retry", this);
-                makeRequest();
-              } else {
-                this.error = error;
-                reject(this.error);
-                this.emit("end", this);
-              }
-            }, this.timeout);
-          },
-
-          // Result handler
-          (e) => {
-            if (timerid) {
-              clearTimeout(timerid);
-            }
-
-            if (e) {
-              this.responseErrors.push(e);
-
-              if (this.canRetry((e as ServiceError).code)) {
-                this.retries++;
-                this.error = undefined;
-                this.emit("retry", this);
-                makeRequest();
-              } else {
-                reject(e);
-
-                // Only signal request end when it was not aborted
-                if (
-                  !(e instanceof RequestError) ||
-                  e.code !== status.CANCELLED
-                ) {
-                  this.emit("end", this);
-                }
-              }
-            } else {
-              resolve(this);
-              this.emit("end", this);
+  public async waitForEnd(): Promise<ProtoRequest<RequestType, ResponseType>> {
+    return new Promise<ProtoRequest<RequestType, ResponseType>>(
+      (resolve, reject) => {
+        // Request is still active, wait for it to complete
+        if (this.isActive) {
+          this.endPromiseQueue.push({ resolve, reject });
+        }
+        // Error handling
+        else if (this.error) {
+          // Never reject if rejectOnError is disabled
+          if (this.client.clientSettings.rejectOnError === false) {
+            resolve(this);
+          }
+          // Always reject when rejectOnError is enabled
+          else if (this.client.clientSettings.rejectOnError === true) {
+            reject(this.error);
+          }
+          // Abort handling
+          else if (this.resolutionType === ResolutionType.Abort) {
+            // Only reject if rejectOnAbort is enabled
+            if (this.client.clientSettings.rejectOnAbort === true) {
+              reject(this.error);
             }
           }
-        );
-      };
-
-      // Kick off the first request
-      makeRequest();
-    });
+          // Nothing configured, default resolve
+          else {
+            resolve(this);
+          }
+        }
+        // Request already completed successfully
+        else {
+          resolve(this);
+        }
+      }
+    );
   }
 }

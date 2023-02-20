@@ -1,4 +1,4 @@
-import type { ProtoRequest } from "./ProtoRequest";
+import { ProtoRequest } from "./ProtoRequest";
 import type * as Protobuf from "protobufjs";
 import type { UntypedProtoRequest } from "./untyped";
 import type { ProtoClient } from "./ProtoClient";
@@ -11,6 +11,8 @@ import type {
   status,
 } from "@grpc/grpc-js";
 import type { VerifyOptions } from "@grpc/grpc-js/build/src/channel-credentials";
+import type { RequestMethodType } from "./constants";
+import type { EventEmitter, Readable } from "stream";
 
 /**
  * Method filter function
@@ -89,9 +91,14 @@ export interface ClientSettings {
   endpoint: string | ClientEndpoint | ClientEndpoint[];
 
   /**
-   * Indicates if error should be thrown when caller cancels the request
+   * Indicates if request/response errors should be thrown. Defaults to false
    */
-  rejectOnAbort?: true;
+  rejectOnError?: boolean;
+
+  /**
+   * Indicates if error should be thrown when caller cancels the request. Defaults to false
+   */
+  rejectOnAbort?: boolean;
 
   /**
    * Time in milliseconds before cancelling the request. Defaults to 0 for no timeout
@@ -212,4 +219,38 @@ export interface RequestOptions {
    * @alias RequestRetryOptions Custom retry options
    */
   retryOptions?: boolean | number | RequestRetryOptions;
+}
+
+/**
+ * Parameters for generating any proto request
+ */
+export interface GenericRequestParams<RequestType, ResponseType> {
+  /**
+   * Fully qualified path of the method for the request that can be used by protobufjs.lookup
+   */
+  method: string;
+  /**
+   * Type of method for the request
+   */
+  requestMethodType?: RequestMethodType;
+  /**
+   * Data to be sent for unary requests
+   */
+  data?: RequestType;
+  /**
+   * Pipes data from a stream to the request stream
+   */
+  pipeStream?: EventEmitter | Readable;
+  /**
+   * Write sandbox for sending data on request streams
+   */
+  writerSandbox?: StreamWriterSandbox<RequestType, ResponseType>;
+  /**
+   * Read iterator for listening on response streams
+   */
+  streamReader?: StreamReader<RequestType, ResponseType>;
+  /**
+   * Request specific options
+   */
+  requestOptions?: RequestOptions;
 }
