@@ -1142,16 +1142,14 @@ export class ProtoClient extends EventEmitter {
       params = { method: params };
     }
 
-    const request = new ProtoRequest<RequestType, ResponseType>({
-      client: this,
-      ...params,
-    });
+    const request = new ProtoRequest<RequestType, ResponseType>(params, this);
 
     // Attach request to the overall client
     this.activeRequests.push(request);
     request.on("aborted", () => this.removeActiveRequest(request));
     request.on("error", () => this.removeActiveRequest(request));
     request.on("end", () => this.removeActiveRequest(request));
+    request.start();
 
     // Let any listeners know
     this.emit("request", request);

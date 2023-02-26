@@ -1,4 +1,9 @@
-import { ServerUnaryCall, sendUnaryData, status } from "@grpc/grpc-js";
+import {
+  ServerUnaryCall,
+  sendUnaryData,
+  status,
+  ServerDuplexStream,
+} from "@grpc/grpc-js";
 import {
   startServer,
   GetCustomerRequest,
@@ -7,9 +12,11 @@ import {
   getUnaryRequest,
   wait,
   makeUnaryRequest,
+  makeBidiStreamRequest,
 } from "./utils";
 import { MockServiceError } from "./MockServiceError";
 import { ProtoClient, ProtoRequest } from "../src";
+import { Readable } from "stream";
 
 describe("ProtoRequest", () => {
   let client: ProtoClient;
@@ -35,6 +42,15 @@ describe("ProtoRequest", () => {
             callback(null, { id: "github", name: "Github" });
           }
         }, RESPONSE_DELAY);
+      },
+      CreateCustomers: (call: ServerDuplexStream<Customer, Customer>) => {
+        call.on("data", (customer) => {
+          call.write(customer);
+        });
+
+        call.on("end", () => {
+          call.end();
+        });
       },
     });
 
@@ -107,6 +123,116 @@ describe("ProtoRequest", () => {
     ).rejects.toThrow(
       `makeServerStreamRequest does not support method 'customers.Customers.GetCustomer', use makeUnaryRequest instead`
     );
+  });
+
+  test("should throw an error if attempting to manually start a requset multiple times", async () => {
+    const request = getUnaryRequest();
+
+    expect(() => request.start()).toThrow(
+      `ProtoRequest.start is an internal method that should not be called`
+    );
+  });
+
+  describe("timing", () => {
+    test("should track basic timing entries for each request", async () => {
+      client.useMiddleware(async () => undefined);
+      const request = await makeBidiStreamRequest(
+        async (write) => {
+          await write({ id: "github", name: "Github" });
+          await write({ id: "npm", name: "NPM" });
+        },
+        async () => {
+          await wait(5);
+        }
+      );
+
+      expect(request.timing).toEqual({
+        started_at: expect.any(Number),
+        ended_at: expect.any(Number),
+
+        middleware: {
+          started_at: expect.any(Number),
+          ended_at: expect.any(Number),
+
+          middleware: [
+            {
+              started_at: expect.any(Number),
+              ended_at: expect.any(Number),
+            },
+          ],
+        },
+
+        attempts: [
+          {
+            started_at: expect.any(Number),
+            status_received_at: expect.any(Number),
+            metadata_received_at: expect.any(Number),
+            ended_at: expect.any(Number),
+
+            write_stream: {
+              started_at: expect.any(Number),
+              ended_at: expect.any(Number),
+
+              messages: [
+                {
+                  started_at: expect.any(Number),
+                  written_at: expect.any(Number),
+                },
+                {
+                  started_at: expect.any(Number),
+                  written_at: expect.any(Number),
+                },
+              ],
+            },
+
+            read_stream: {
+              started_at: expect.any(Number),
+              ended_at: expect.any(Number),
+              last_processed_at: expect.any(Number),
+
+              messages: [
+                {
+                  received_at: expect.any(Number),
+                  ended_at: expect.any(Number),
+                },
+                {
+                  received_at: expect.any(Number),
+                  ended_at: expect.any(Number),
+                },
+              ],
+            },
+          },
+        ],
+      });
+    });
+
+    test("should also track piped streams as well", async () => {
+      const request = await makeBidiStreamRequest(
+        Readable.from([
+          { id: "github", name: "Github" },
+          { id: "npm", name: "NPM" },
+        ]),
+        async () => {
+          await wait(5);
+        }
+      );
+
+      expect(request.timing.attempts[0].pipe_stream).toEqual({
+        started_at: expect.any(Number),
+        ended_at: expect.any(Number),
+
+        messages: [
+          {
+            received_at: expect.any(Number),
+            written_at: expect.any(Number),
+          },
+          {
+            received_at: expect.any(Number),
+            written_at: expect.any(Number),
+          },
+        ],
+      });
+    });
   });
 
   describe("Queued Errors", () => {
@@ -266,6 +392,48 @@ describe("ProtoRequest", () => {
       expect(request.isActive).toStrictEqual(false);
       await expect(request.waitForEnd()).rejects.toThrow(
         `Cancelled makeUnaryRequest for 'customers.Customers.GetCustomer'`
+      );
+    });
+  });
+
+  describe("toString", () => {
+    test("should mark timings of writes & reads", async () => {
+      const request = await makeBidiStreamRequest(
+        async (write) => {
+          await write({ id: "github", name: "Github" });
+          await write({ id: "npm", name: "NPM" });
+        },
+        async () => {
+          await wait(5);
+        }
+      );
+
+      expect(`${request}`).toMatch(
+        /^\[BidiStreamRequest:OK\] "customers.Customers.CreateCustomers" \((\d+)ms\) attempts:1 writes:(\d+)ms reads:(\d+)ms$/
+      );
+    });
+
+    test("should mark pipe timings", async () => {
+      const request = await makeBidiStreamRequest(
+        Readable.from([
+          { id: "github", name: "Github" },
+          { id: "npm", name: "NPM" },
+        ]),
+        async () => {
+          await wait(5);
+        }
+      );
+
+      expect(`${request}`).toMatch(
+        /^\[BidiStreamRequest:OK\] "customers.Customers.CreateCustomers" \((\d+)ms\) attempts:1 pipe:(\d+)ms reads:(\d+)ms$/
+      );
+    });
+
+    test("should only mark timings that are hit", async () => {
+      const request = await makeUnaryRequest();
+
+      expect(`${request}`).toMatch(
+        /^\[UnaryRequest:OK\] "customers.Customers.GetCustomer" \((\d+)ms\) attempts:1$/
       );
     });
   });

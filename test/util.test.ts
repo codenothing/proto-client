@@ -19,12 +19,13 @@ describe("util", () => {
       },
     });
 
-    request = new ProtoRequest<unknown, unknown>({
-      client,
-      method: "customers.Customers.GetCustomer",
-      requestMethodType: RequestMethodType.UnaryRequest,
-      blockAutoStart: true,
-    });
+    request = new ProtoRequest<unknown, unknown>(
+      {
+        method: "customers.Customers.GetCustomer",
+        requestMethodType: RequestMethodType.UnaryRequest,
+      },
+      client
+    );
   });
 
   describe("generateEndpointMatcher", () => {
