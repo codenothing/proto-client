@@ -36,8 +36,6 @@ export class RequestError extends Error implements ServiceError {
     if (!details) {
       if (code === status.CANCELLED) {
         details = `Cancelled ${request.requestMethodType} for '${request.method}'`;
-      } else if (code === status.DEADLINE_EXCEEDED) {
-        details = `${request.requestMethodType} for '${request.method}' timed out`;
       } else {
         details = `${code} ${status[code]}: ${request.requestMethodType} for '${request.method}'`;
       }

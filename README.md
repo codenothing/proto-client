@@ -149,7 +149,6 @@ Every request is wrapped in a retry function, allowing for fully customized hand
 
 - `retryCount`: Number of times to retry request. Defaults to none
 - `status`: Status code(s) request is allowed to retry on. Uses default list of status codes if not defined
-- `retryOnClientTimeout`: Indicates if retries should be allowed when the client times out. Defaults to true.
 
 ## Static Code Generation
 

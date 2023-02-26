@@ -233,9 +233,7 @@ describe("makeServerStreamRequest", () => {
       { timeout: 100 }
     );
 
-    expect(error?.message).toEqual(
-      `makeServerStreamRequest for 'customers.Customers.FindCustomers' timed out`
-    );
+    expect(error?.message).toEqual(`4 DEADLINE_EXCEEDED: Deadline exceeded`);
   });
 
   test("should handle service errors", async () => {

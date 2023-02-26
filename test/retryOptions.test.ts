@@ -50,7 +50,7 @@ describe("retryOptions", () => {
     );
 
     expect(request.error?.message).toEqual(
-      `makeUnaryRequest for 'customers.Customers.GetCustomer' timed out`
+      `4 DEADLINE_EXCEEDED: Deadline exceeded`
     );
     expect(request.responseErrors).toEqual([
       expect.objectContaining({ code: status.DEADLINE_EXCEEDED }),
@@ -138,24 +138,5 @@ describe("retryOptions", () => {
       expect.objectContaining({ code: status.INTERNAL }),
     ]);
     expect(request.error).toStrictEqual(request.responseErrors[2]);
-  });
-
-  test("should not retry when configured to error out on timeouts", async () => {
-    RESPONSE_DELAY = 2000;
-    const request = await makeUnaryRequest(
-      { id: "github" },
-      {
-        timeout: 100,
-        retryOptions: { retryCount: 3, retryOnClientTimeout: false },
-      }
-    );
-
-    expect(request.error?.message).toEqual(
-      `makeUnaryRequest for 'customers.Customers.GetCustomer' timed out`
-    );
-    expect(request.responseErrors).toEqual([
-      expect.objectContaining({ code: status.DEADLINE_EXCEEDED }),
-    ]);
-    expect(request.error).toStrictEqual(request.responseErrors[0]);
   });
 });

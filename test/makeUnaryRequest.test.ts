@@ -115,7 +115,7 @@ describe("makeUnaryRequest", () => {
     );
 
     expect(error?.message).toStrictEqual(
-      `makeUnaryRequest for 'customers.Customers.GetCustomer' timed out`
+      `4 DEADLINE_EXCEEDED: Deadline exceeded`
     );
   });
 

@@ -181,11 +181,6 @@ export interface RequestRetryOptions {
    * Status codes request is allowed to retry on
    */
   status?: status | status[];
-
-  /**
-   * Indicates if retry should occur after internal client timeout. Defaults to true
-   */
-  retryOnClientTimeout?: boolean;
 }
 
 /**

@@ -188,56 +188,47 @@ describe("makeBidiStreamRequest", () => {
 
   test("should ignore first try failure if the retry is successful", async () => {
     RESPONSE_DELAY = 1000;
-    return new Promise<void>((resolve, reject) => {
-      const customers: Customer[] = [
-        {
-          id: "circleci",
-          name: "CircleCI",
-        },
-        {
-          id: "vscode",
-          name: "VSCode",
-        },
-      ];
-      const readCustomers: Customer[] = [];
+    const customers: Customer[] = [
+      {
+        id: "circleci",
+        name: "CircleCI",
+      },
+      {
+        id: "vscode",
+        name: "VSCode",
+      },
+    ];
+    const readCustomers: Customer[] = [];
 
-      makeBidiStreamRequest(
-        async (write) => {
-          await write(customers[0]);
-          await write(customers[1]);
-        },
-        async (row) => {
-          readCustomers.push(row);
-        },
-        { timeout: 200, retryOptions: true }
-      )
-        .then((request) => {
-          try {
-            expect(readCustomers).toEqual([
-              {
-                id: "circleci",
-                name: "CircleCI",
-              },
-              {
-                id: "vscode",
-                name: "VSCode",
-              },
-            ]);
-            expect(request.error).toBeUndefined();
-            expect(request.responseErrors).toEqual([
-              expect.objectContaining({ code: status.DEADLINE_EXCEEDED }),
-            ]);
-            resolve();
-          } catch (e) {
-            reject(e);
-          }
-        })
-        .catch((e) => {
-          reject(e);
-        });
+    const requestPromise = makeBidiStreamRequest(
+      async (write) => {
+        await write(customers[0]);
+        await write(customers[1]);
+      },
+      async (row) => {
+        readCustomers.push(row);
+      },
+      { timeout: 200, retryOptions: true }
+    );
 
-      setTimeout(() => (RESPONSE_DELAY = 0), 100);
-    });
+    await wait(100);
+    RESPONSE_DELAY = 0;
+
+    const { error, responseErrors } = await requestPromise;
+    expect(readCustomers).toEqual([
+      {
+        id: "circleci",
+        name: "CircleCI",
+      },
+      {
+        id: "vscode",
+        name: "VSCode",
+      },
+    ]);
+    expect(error).toBeUndefined();
+    expect(responseErrors).toEqual([
+      expect.objectContaining({ code: status.DEADLINE_EXCEEDED }),
+    ]);
   });
 
   test("should propagate write sandbox errors", async () => {
@@ -319,9 +310,7 @@ describe("makeBidiStreamRequest", () => {
       { timeout: 100 }
     );
 
-    expect(error?.message).toEqual(
-      `makeBidiStreamRequest for 'customers.Customers.CreateCustomers' timed out`
-    );
+    expect(error?.message).toEqual(`4 DEADLINE_EXCEEDED: Deadline exceeded`);
   });
 
   test("should handle service errors", async () => {
