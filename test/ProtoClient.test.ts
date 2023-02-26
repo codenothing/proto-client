@@ -92,12 +92,13 @@ describe("ProtoClient", () => {
     const results = await startServer(serviceMethods);
     client = results.client;
 
-    request = new ProtoRequest<GetCustomerRequest, Customer>({
-      client,
-      method: "customers.Customers.GetCustomer",
-      requestMethodType: RequestMethodType.UnaryRequest,
-      blockAutoStart: true,
-    });
+    request = new ProtoRequest<GetCustomerRequest, Customer>(
+      {
+        method: "customers.Customers.GetCustomer",
+        requestMethodType: RequestMethodType.UnaryRequest,
+      },
+      client
+    );
   });
 
   test("should proxy settings passed on init to each configuration method", () => {

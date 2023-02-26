@@ -16,6 +16,7 @@ import { RequestError } from "./RequestError";
 import { DEFAULT_RETRY_STATUS_CODES, RequestMethodType } from "./constants";
 import type {
   GenericRequestParams,
+  RequestLifecycleTiming,
   RequestRetryOptions,
   StreamReader,
   StreamWriterSandbox,
@@ -23,10 +24,6 @@ import type {
 import { normalizeRetryOptions } from "./util";
 import { promisify } from "util";
 import type { Readable } from "stream";
-
-// Shortcut types to proto functional parameters
-type VerifyArgs = Parameters<typeof Protobuf.Message.verify>;
-type CreateArgs = Parameters<typeof Protobuf.Message.create>;
 
 /**
  * Internal reason for resolving request
@@ -37,21 +34,18 @@ const enum ResolutionType {
   Abort,
 }
 
-/**
- * Add internal options to external request params
- * @private
- */
-interface ProtoRequestProps<RequestType, ResponseType>
-  extends GenericRequestParams<RequestType, ResponseType> {
-  /**
-   * ProtoClient tied to the request
-   */
-  client: ProtoClient;
-  /**
-   * For testing purposes only, block starting of the proto request
-   */
-  blockAutoStart?: true;
-}
+// Protobuf Shortcuts
+type VerifyArgs = Parameters<typeof Protobuf.Message.verify>;
+type CreateArgs = Parameters<typeof Protobuf.Message.create>;
+
+// Timing Shortcuts
+type TimingAttempt = Required<RequestLifecycleTiming["attempts"][0]>;
+type ReadStreamTiming = TimingAttempt["read_stream"];
+type ReadStreamTimingMessage = ReadStreamTiming["messages"][0];
+type WriteStreamTiming = TimingAttempt["write_stream"];
+type WriteStreamTimingMessage = WriteStreamTiming["messages"][0];
+type PipeTiming = TimingAttempt["pipe_stream"];
+type PipeTimingMessage = PipeTiming["messages"][0];
 
 /**
  * Custom event typings
@@ -198,6 +192,17 @@ export interface ProtoRequest<RequestType, ResponseType> {
  * Individual gRPC request
  */
 export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
+  /**
+   * Source lifecycle timing storage
+   * @type {RequestLifecycleTiming}
+   * @readonly
+   */
+  public readonly timing: RequestLifecycleTiming = {
+    started_at: Date.now(),
+    middleware: { middleware: [] },
+    attempts: [],
+  };
+
   /**
    * Fully qualified path of the method for the request that can be used by protobufjs.lookup
    * @type {string}
@@ -366,6 +371,16 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   private readonly client: ProtoClient;
 
   /**
+   * Source lifecycle timing storage
+   * @type {RequestLifecycleTiming}
+   * @readonly
+   * @private
+   */
+  private timingAttempt: RequestLifecycleTiming["attempts"][0] = {
+    started_at: Date.now(),
+  };
+
+  /**
    * End promise queue while request is active
    * @type {Promise[]}
    * @private
@@ -406,25 +421,18 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
    * @package
    * @private
    */
-  constructor({
-    client,
-    method,
-    requestMethodType,
-    data,
-    pipeStream,
-    writerSandbox,
-    streamReader,
-    requestOptions,
-    blockAutoStart,
-  }: ProtoRequestProps<RequestType, ResponseType>) {
+  constructor(
+    params: GenericRequestParams<RequestType, ResponseType>,
+    client: ProtoClient
+  ) {
     super();
 
-    this.method = method;
+    this.method = params.method;
     this.client = client;
-    this.requestData = data;
-    this.pipeStream = pipeStream;
-    this.writerSandbox = writerSandbox;
-    this.streamReader = streamReader;
+    this.requestData = params.data;
+    this.pipeStream = params.pipeStream;
+    this.writerSandbox = params.writerSandbox;
+    this.streamReader = params.streamReader;
 
     // Break down the method to configure the path
     const methodParts = this.method.split(/\./g);
@@ -454,11 +462,11 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
         : RequestMethodType.UnaryRequest;
 
     // Only throw on expected method mismatch when defined
-    if (requestMethodType) {
-      this.requestMethodType = requestMethodType;
-      if (expectedMethod !== requestMethodType) {
+    if (params.requestMethodType) {
+      this.requestMethodType = params.requestMethodType;
+      if (expectedMethod !== params.requestMethodType) {
         throw new Error(
-          `${requestMethodType} does not support method '${this.method}', use ${expectedMethod} instead`
+          `${params.requestMethodType} does not support method '${this.method}', use ${expectedMethod} instead`
         );
       }
     } else {
@@ -472,6 +480,8 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     this.responseType = this.client
       .getRoot()
       .lookupType(this.serviceMethod.responseType);
+
+    const { requestOptions } = params;
 
     // Use default request options
     if (!requestOptions) {
@@ -519,11 +529,6 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       else {
         this.metadata = new Metadata();
       }
-    }
-
-    // For internal testing only, allow auto starting of the request
-    if (blockAutoStart !== true) {
-      this.start();
     }
   }
 
@@ -598,24 +603,33 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   }
 
   /**
-   * Kicks off the request, adds abort listener and runs middleware
-   * @private
+   * Internal use only, kicks off the request, adds abort listener and runs middleware
+   * @package
    */
-  private start() {
+  public start() {
+    // Block duplicate calls to start(), can only happen through accidental usage
+    if (this.timing.middleware.started_at) {
+      throw new Error(
+        `ProtoRequest.start is an internal method that should not be called`
+      );
+    }
+
     // Listen for caller aborting of this request
     this.abortController.signal.addEventListener("abort", () => {
-      if (this.stream) {
-        this.stream.cancel();
-        this.resolveRequest(
-          ResolutionType.Abort,
-          new RequestError(status.CANCELLED, this)
-        );
-      }
+      this.stream?.cancel();
+      this.resolveRequest(
+        ResolutionType.Abort,
+        new RequestError(status.CANCELLED, this)
+      );
     });
 
     // Run middleware before entering request loop
     this.runMiddleware()
-      .then(this.makeRequest.bind(this))
+      .then(() => {
+        if (this.isActive) {
+          this.makeRequest();
+        }
+      })
       .catch((e) => {
         let error: Error;
 
@@ -636,10 +650,37 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
    * @private
    */
   private async runMiddleware() {
-    for (const middleware of this.client.middleware) {
-      if (this.isActive) {
+    this.timing.middleware.started_at = Date.now();
+
+    let timing:
+      | RequestLifecycleTiming["middleware"]["middleware"][0]
+      | undefined;
+    try {
+      for (const middleware of this.client.middleware) {
+        // Time middleware while running it
+        timing = { started_at: Date.now() };
+        this.timing.middleware.middleware.push(timing);
         await middleware(this, this.client);
+        timing.ended_at = Date.now();
+
+        // Exit out if request was aborted in middleware
+        if (!this.isActive) {
+          return;
+        }
       }
+      this.timing.middleware.ended_at = Date.now();
+    } catch (e) {
+      const now = Date.now();
+
+      // Mark timings
+      this.timing.middleware.errored_at = now;
+      this.timing.middleware.ended_at = now;
+      if (timing) {
+        timing.ended_at = now;
+      }
+
+      // Rethrow error
+      throw e;
     }
   }
 
@@ -649,6 +690,10 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
    * @private
    */
   private makeRequest(): void {
+    this.timingAttempt = { started_at: Date.now() };
+    this.timing.attempts.push(this.timingAttempt);
+
+    // Reset reference data
     this.stream = null;
     this.resolutionType = undefined;
     this.error = undefined;
@@ -727,10 +772,26 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
     // Bind response Metadata and Status to the request object
     const stream = this.stream;
-    const onMetadata = (metadata: Metadata) =>
-      (this.responseMetadata = metadata);
+    const onMetadata = (metadata: Metadata) => {
+      if (stream === this.stream) {
+        this.timingAttempt.metadata_received_at = Date.now();
+        this.responseMetadata = metadata;
+      }
+    };
     const onStatus = (status: StatusObject) => {
-      this.responseStatus = status;
+      /**
+       * NOTE: For unary callbacks (Unary/ClientStream requests), the status event
+       * does not emit until after the callback is triggered. Given that the status
+       * contains the trailing metadata, we need to assume that as long as a retry
+       * request has not started (this.stream is null) means that this event belongs
+       * to the most recently resolved (success or failure) attempt.
+       *
+       * https://github.com/grpc/grpc-node/blob/%40grpc/grpc-js%401.7.3/packages/grpc-js/src/client.ts#L360
+       */
+      if (stream === this.stream || !this.stream) {
+        this.timingAttempt.status_received_at = Date.now();
+        this.responseStatus = status;
+      }
 
       // Status event comes in after the end event, so need
       // to keep these here
@@ -782,6 +843,13 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       return;
     }
 
+    // Track timings
+    const readTiming: ReadStreamTiming = {
+      started_at: Date.now(),
+      messages: [],
+    };
+    this.timingAttempt.read_stream = readTiming;
+
     // Local refs for read stream lifecycle management
     let counter = 0;
     let responseRowIndex = 0;
@@ -798,6 +866,12 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
         return removeListeners();
       }
 
+      // Track message times
+      const messageTiming: ReadStreamTimingMessage = {
+        received_at: Date.now(),
+      };
+      readTiming.messages.push(messageTiming);
+
       // Signal first response from the server
       if (responseRowIndex === 0) {
         this.emit("response", this);
@@ -808,6 +882,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
       // Stream reader is optional
       if (!this.streamReader) {
+        messageTiming.ended_at = Date.now();
         return;
       }
 
@@ -815,13 +890,17 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       counter++;
       this.streamReader(row, responseRowIndex++, this)
         .then(() => {
+          messageTiming.ended_at = Date.now();
           if (--counter < 1 && ended && this.stream === stream) {
+            readTiming.last_processed_at = Date.now();
             this.resolveRequest(ResolutionType.Default);
           }
         })
         // Bubble any stream reader errors back to the caller
         .catch((e) => {
+          messageTiming.ended_at = Date.now();
           if (this.stream === stream) {
+            readTiming.last_processed_at = Date.now();
             this.stream.cancel();
             this.resolveRequest(ResolutionType.Default, e);
           }
@@ -830,6 +909,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
     // Any service error should kill the stream
     const onError = (e: Error) => {
+      readTiming.errored_at ||= Date.now();
       ended = true;
       removeListeners();
 
@@ -841,6 +921,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     // End event should trigger closure of request as long
     // as all stream reader operations are complete
     const onEnd = () => {
+      readTiming.ended_at ||= Date.now();
       ended = true;
       removeListeners();
 
@@ -873,10 +954,25 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       return;
     }
 
+    // Track timings
+    const pipeTiming: PipeTiming = {
+      started_at: Date.now(),
+      messages: [],
+    };
+    this.timingAttempt.pipe_stream = pipeTiming;
+
     // Transfer incoming data to the request stream
     const onData = (row: RequestType) => {
+      // Track message times
+      const messageTiming: PipeTimingMessage = {
+        received_at: Date.now(),
+      };
+      pipeTiming.messages.push(messageTiming);
+
       if (this.stream === stream) {
-        stream.write(row);
+        stream.write(row, () => {
+          messageTiming.written_at = Date.now();
+        });
       } else {
         removeListeners();
       }
@@ -884,6 +980,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
     // Cancel the request if there is an error in the pipe
     const onError = (e: unknown) => {
+      pipeTiming.errored_at ||= Date.now();
       removeListeners();
       if (this.stream === stream) {
         const error =
@@ -896,6 +993,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
     // End the write stream when the pipe completes
     const onEnd = () => {
+      pipeTiming.ended_at ||= Date.now();
       removeListeners();
       if (this.stream === stream) {
         stream.end();
@@ -924,12 +1022,31 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     if (!this.isRequestStream || !stream || this.pipeStream) {
       return;
     } else if (!this.writerSandbox) {
+      this.timingAttempt.write_stream = {
+        started_at: Date.now(),
+        ended_at: Date.now(),
+        messages: [],
+      };
       stream.end();
       return;
     }
 
+    // Track timings
+    const writeTiming: WriteStreamTiming = {
+      started_at: Date.now(),
+      messages: [],
+    };
+    this.timingAttempt.write_stream = writeTiming;
+
     // Let the caller start safely writing to the stream
     this.writerSandbox(async (data: RequestType, encoding?: string) => {
+      // Track message times
+      const messageTiming: WriteStreamTimingMessage = {
+        started_at: Date.now(),
+      };
+      writeTiming.messages.push(messageTiming);
+
+      // Verify stream is still writable
       if (stream !== this.stream || !this.isWritable) {
         throw new Error(
           `The write stream has already closed for ${this.method}`
@@ -945,13 +1062,19 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       // Write message to the stream, waiting for the callback
       // to return before resolving write
       await promisify(stream.write.bind(stream, data, encoding))();
+      messageTiming.written_at = Date.now();
     }, this)
       .then(() => {
+        writeTiming.ended_at ||= Date.now();
+
         if (stream === this.stream) {
           stream.end();
         }
       })
       .catch((e) => {
+        writeTiming.errored_at ||= Date.now();
+        writeTiming.ended_at ||= Date.now();
+
         if (stream === this.stream) {
           this.stream.cancel();
           this.resolveRequest(ResolutionType.Default, e);
@@ -970,10 +1093,13 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       return;
     }
 
+    const now = Date.now();
     this.stream = null;
     this.resolutionType = resolutionType;
+    this.timingAttempt.ended_at ||= now;
 
     if (error) {
+      this.timingAttempt.errored_at ||= now;
       this.responseErrors.push(error);
 
       // Allow for retries
@@ -984,6 +1110,8 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       }
       // End request with an error
       else {
+        this.timing.errored_at ||= now;
+        this.timing.ended_at ||= now;
         this.isRequestActive = false;
         this.error = error;
 
@@ -1015,6 +1143,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     }
     // Successful response
     else {
+      this.timing.ended_at ||= now;
       this.isRequestActive = false;
       this.endPromiseQueue.forEach(({ resolve }) => resolve(this));
       this.endPromiseQueue = [];
@@ -1135,5 +1264,63 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
         }
       }
     );
+  }
+
+  /**
+   * Builds a human readable description of results for this request
+   */
+  public toString(): string {
+    const now = Date.now();
+
+    // Shortcuts
+    const methodType = this.requestMethodType.replace(/^make/, "");
+    const statusDisplay = this.isActive
+      ? "ACTIVE"
+      : this.error
+      ? status[(this.error as RequestError).code || status.UNKNOWN]
+      : "OK";
+    const diff = (this.timing.ended_at || now) - this.timing.started_at;
+    const middlewareRange = this.timing.middleware.started_at
+      ? (this.timing.middleware.ended_at || now) -
+        this.timing.middleware.started_at
+      : 0;
+
+    // Compile total time spent in each action
+    let writeRange: number | undefined;
+    let pipeRange: number | undefined;
+    let readRange: number | undefined;
+    this.timing.attempts.forEach((attempt) => {
+      if (attempt.write_stream) {
+        writeRange ||= 0;
+        writeRange +=
+          (attempt.write_stream.ended_at || now) -
+          attempt.write_stream.started_at;
+      }
+      if (attempt.pipe_stream) {
+        pipeRange ||= 0;
+        pipeRange +=
+          (attempt.pipe_stream.ended_at || now) -
+          attempt.pipe_stream.started_at;
+      }
+      if (attempt.read_stream) {
+        readRange ||= 0;
+        readRange +=
+          (attempt.read_stream.ended_at || now) -
+          attempt.read_stream.started_at;
+      }
+    });
+
+    return [
+      `[${methodType}:${statusDisplay}]`,
+      `"${this.method}"`,
+      `(${diff}ms)`,
+      `attempts:${this.timing.attempts.length}`,
+      middlewareRange ? `middleware:${middlewareRange}ms` : null,
+      writeRange !== undefined ? `writes:${writeRange}ms` : null,
+      pipeRange !== undefined ? `pipe:${pipeRange}ms` : null,
+      readRange !== undefined ? `reads:${readRange}ms` : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
   }
 }

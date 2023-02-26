@@ -249,3 +249,103 @@ export interface GenericRequestParams<RequestType, ResponseType> {
    */
   requestOptions?: RequestOptions;
 }
+
+/**
+ * Unix timestamps of important markers throughout the request lifecycle
+ */
+export interface RequestLifecycleTiming {
+  /** Timestamp of when the request started */
+  started_at: number;
+  /** Timestamp of when the request resolved with an error */
+  errored_at?: number;
+  /** Timestamp of when the request resolved */
+  ended_at?: number;
+
+  /** Middleware specific time logs */
+  middleware: {
+    /** Timestamp of when request starts to run all middleware */
+    started_at?: number;
+    /** Timestamp of when error occurs during middleware */
+    errored_at?: number;
+    /** Timestamp of when all middleware is complete */
+    ended_at?: number;
+
+    /** Individual timestamps for each middleware that is run */
+    middleware: Array<{
+      /** Timestamp of when individual middleware starts */
+      started_at: number;
+      /** Timestamp of when individual middleware ends */
+      ended_at?: number;
+    }>;
+  };
+
+  /** Time markers for each attempt (or retry) this request makes */
+  attempts: Array<{
+    /** Timestamp of when this attempt starts */
+    started_at: number;
+    /** Timestamp of when this attempt receives response metadata */
+    metadata_received_at?: number;
+    /** Timestamp of when this attempt receives the status data (includes trailing metadata) */
+    status_received_at?: number;
+    /** Timestamp of when this attempt finishes with an error */
+    errored_at?: number;
+    /** Timestamp of when this attempt finishes */
+    ended_at?: number;
+
+    /** Time markers for writers sandbox on this attempt */
+    write_stream?: {
+      /** Timestamp of when the writers sandbox starts */
+      started_at: number;
+      /** Timestamp of when an error is thrown from the sandbox */
+      errored_at?: number;
+      /** Timestamp of when the sandbox is complete */
+      ended_at?: number;
+
+      /** Time markers for individual writes */
+      messages: Array<{
+        /** Timestamp of when a write to the stream starts */
+        started_at: number;
+        /** Timestamp of when a write to the stream completes */
+        written_at?: number;
+      }>;
+    };
+
+    /** Time markers when piping a stream to the request stream for this attempt */
+    pipe_stream?: {
+      /** Timestamp of when piping starts */
+      started_at: number;
+      /** Timestamp of when an error is found during piping */
+      errored_at?: number;
+      /** Timestamp of when piping completes */
+      ended_at?: number;
+
+      /** Time markers for individual piped messages */
+      messages: Array<{
+        /** Timestamp of when a message is received from the pipe */
+        received_at: number;
+        /** Timestamp of when a message is finishes writing to the request stream */
+        written_at?: number;
+      }>;
+    };
+
+    /** Time markers when reading messages from the response stream for this attempt */
+    read_stream?: {
+      /** Timestamp of when the reading starts */
+      started_at: number;
+      /** Timestamp of when an error is found during reading */
+      errored_at?: number;
+      /** Timestamp of when reading completes */
+      ended_at?: number;
+      /** Timestamp of when the last [used] message is fully processed */
+      last_processed_at?: number;
+
+      /** Time markers for individual read messages */
+      messages: Array<{
+        /** Timestamp of when a message is received from the response */
+        received_at: number;
+        /** Timestamp of when a message iteterator completes processing of the message */
+        ended_at?: number;
+      }>;
+    };
+  }>;
+}

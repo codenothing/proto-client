@@ -2,6 +2,7 @@ import { ServerUnaryCall, sendUnaryData } from "@grpc/grpc-js";
 import { ProtoRequest } from "../src";
 import {
   Customer,
+  getClient,
   GetCustomerRequest,
   makeUnaryRequest,
   startServer,
@@ -10,9 +11,11 @@ import {
 describe("metadata", () => {
   let activeRequest: ProtoRequest<GetCustomerRequest, Customer>;
   let thrownEntity: Error | string | object | undefined;
+  let SHOULD_ABORT: boolean;
 
   beforeEach(async () => {
     thrownEntity = undefined;
+    SHOULD_ABORT = false;
 
     const { client } = await startServer({
       GetCustomer: (
@@ -39,6 +42,8 @@ describe("metadata", () => {
 
       if (thrownEntity !== undefined) {
         throw thrownEntity;
+      } else if (SHOULD_ABORT) {
+        req.abort();
       }
     });
   });
@@ -68,5 +73,15 @@ describe("metadata", () => {
 
     const { error } = await makeUnaryRequest({ id: "github" });
     expect(error?.message).toStrictEqual(`Unknown Middleware Error`);
+  });
+
+  test("should not run a request at all if aborted during middleware", async () => {
+    SHOULD_ABORT = true;
+    getClient().clientSettings.rejectOnError = false;
+    const request = await makeUnaryRequest({ id: "github" });
+    expect(request.error?.message).toStrictEqual(
+      `Cancelled makeUnaryRequest for 'customers.Customers.GetCustomer'`
+    );
+    expect(request.timing.attempts.length).toStrictEqual(0);
   });
 });
