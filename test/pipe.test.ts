@@ -142,47 +142,4 @@ describe("pipe", () => {
     await request.waitForEnd();
     expect(request.error?.message).toStrictEqual(`Pipe stream error`);
   });
-
-  test("should ignore extra events emitted from piped stream once request is completed", async () => {
-    const stream = new EventEmitter();
-    const request = client.getRequest<Customer, CustomersResponse>({
-      method: "customers.Customers.EditCustomer",
-      pipeStream: stream,
-    });
-
-    await wait();
-    stream.emit("data", { id: "github", name: "Github" });
-    await wait();
-    stream.emit("end");
-
-    await request.waitForEnd();
-    expect(request.error).toBeUndefined();
-    expect(request.result).toEqual({
-      customers: [{ id: "github", name: "Github" }],
-    });
-
-    // Emitting more data should be ignored
-    stream.emit("data", { id: "npm", name: "NPM" });
-    await request.waitForEnd();
-    expect(request.error).toBeUndefined();
-    expect(request.result).toEqual({
-      customers: [{ id: "github", name: "Github" }],
-    });
-
-    // Emitting an error should be ignored
-    stream.emit("error", new Error(`Mock Pipe Error`));
-    await request.waitForEnd();
-    expect(request.error).toBeUndefined();
-    expect(request.result).toEqual({
-      customers: [{ id: "github", name: "Github" }],
-    });
-
-    // Emitting end event again should be ignored
-    stream.emit("end");
-    await request.waitForEnd();
-    expect(request.error).toBeUndefined();
-    expect(request.result).toEqual({
-      customers: [{ id: "github", name: "Github" }],
-    });
-  });
 });

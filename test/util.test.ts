@@ -78,9 +78,6 @@ describe("util", () => {
       expect(normalizeRetryOptions(true)).toStrictEqual({ retryCount: 1 });
       expect(normalizeRetryOptions(false)).toStrictEqual({ retryCount: 0 });
       expect(normalizeRetryOptions(15)).toStrictEqual({ retryCount: 15 });
-      expect(
-        normalizeRetryOptions({ retryCount: 3, retryOnClientTimeout: true })
-      ).toStrictEqual({ retryCount: 3, retryOnClientTimeout: true });
     });
   });
 });

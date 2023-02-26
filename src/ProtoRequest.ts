@@ -34,7 +34,6 @@ type CreateArgs = Parameters<typeof Protobuf.Message.create>;
  */
 const enum ResolutionType {
   Default,
-  Timeout,
   Abort,
 }
 
@@ -88,6 +87,10 @@ export interface ProtoRequest<RequestType, ResponseType> {
     event: "end",
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
   ): this;
+  on(
+    event: "close",
+    listener: (request: ProtoRequest<RequestType, ResponseType>) => void
+  ): this;
 
   once(
     event: "data",
@@ -119,6 +122,10 @@ export interface ProtoRequest<RequestType, ResponseType> {
     event: "end",
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
   ): this;
+  once(
+    event: "close",
+    listener: (request: ProtoRequest<RequestType, ResponseType>) => void
+  ): this;
 
   off(
     event: "data",
@@ -148,6 +155,10 @@ export interface ProtoRequest<RequestType, ResponseType> {
   ): this;
   off(
     event: "end",
+    listener: (request: ProtoRequest<RequestType, ResponseType>) => void
+  ): this;
+  off(
+    event: "close",
     listener: (request: ProtoRequest<RequestType, ResponseType>) => void
   ): this;
 
@@ -175,6 +186,10 @@ export interface ProtoRequest<RequestType, ResponseType> {
   ): boolean;
   emit(
     eventName: "end",
+    request: ProtoRequest<RequestType, ResponseType>
+  ): boolean;
+  emit(
+    eventName: "close",
     request: ProtoRequest<RequestType, ResponseType>
   ): boolean;
 }
@@ -371,13 +386,6 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     | ClientWritableStream<RequestType>
     | ClientDuplexStream<RequestType, ResponseType>
     | null = null;
-
-  /**
-   * Request timeout ID reference
-   * @type {NodeJS.Timeout | undefined}
-   * @private
-   */
-  private requestTimerId?: NodeJS.Timeout;
 
   /**
    * Internal reference to tracking activity of the request
@@ -647,6 +655,12 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     this.responseMetadata = undefined;
     this.responseStatus = undefined;
 
+    // Apply timeout to the deadline (if not already set)
+    const callOptions = Object.create(this.callOptions) as CallOptions;
+    if (this.timeout && callOptions.deadline === undefined) {
+      callOptions.deadline = Date.now() + this.timeout;
+    }
+
     // Data sanitation
     if (!this.isRequestStream && this.requestData) {
       const validationError = this.requestType.verify(this.requestData);
@@ -656,16 +670,6 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           new RequestError(status.INVALID_ARGUMENT, this, validationError)
         );
       }
-    }
-
-    // Setup client timeout
-    if (this.timeout) {
-      this.requestTimerId = setTimeout(() => {
-        this.resolveRequest(
-          ResolutionType.Timeout,
-          new RequestError(status.DEADLINE_EXCEEDED, this)
-        );
-      }, this.timeout);
     }
 
     // Unary Request
@@ -678,7 +682,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           this.deserializeResponse.bind(this),
           (this.requestData || {}) as RequestType,
           this.metadata,
-          this.callOptions,
+          callOptions,
           this.unaryCallback.bind(this, this.retries)
         );
     }
@@ -691,7 +695,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           this.serializeRequest.bind(this),
           this.deserializeResponse.bind(this),
           this.metadata,
-          this.callOptions,
+          callOptions,
           this.unaryCallback.bind(this, this.retries)
         );
     }
@@ -705,7 +709,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           this.deserializeResponse.bind(this),
           (this.requestData || {}) as RequestType,
           this.metadata,
-          this.callOptions
+          callOptions
         );
     }
     // Bidirectional Stream Request
@@ -717,16 +721,24 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
           this.serializeRequest.bind(this),
           this.deserializeResponse.bind(this),
           this.metadata,
-          this.callOptions
+          callOptions
         );
     }
 
     // Bind response Metadata and Status to the request object
-    this.stream.on(
-      "metadata",
-      (metadata) => (this.responseMetadata = metadata)
-    );
-    this.stream.on("status", (status) => (this.responseStatus = status));
+    const stream = this.stream;
+    const onMetadata = (metadata: Metadata) =>
+      (this.responseMetadata = metadata);
+    const onStatus = (status: StatusObject) => {
+      this.responseStatus = status;
+
+      // Status event comes in after the end event, so need
+      // to keep these here
+      stream.off("metadata", onMetadata);
+      stream.off("status", onStatus);
+    };
+    stream.once("metadata", onMetadata);
+    stream.once("status", onStatus);
 
     // Setup read/write stream handling
     this.readFromServer();
@@ -773,7 +785,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
     // Local refs for read stream lifecycle management
     let counter = 0;
     let responseRowIndex = 0;
-    let finished = false;
+    let ended = false;
 
     /**
      * Proxy each chunk of data from the service to the streamReader
@@ -781,62 +793,73 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
      * Request is not resolved until all streamReader operations
      * have completed
      */
-    stream.on("data", (row: ResponseType) => {
-      if (this.stream === stream) {
-        if (responseRowIndex === 0) {
-          this.emit("response", this);
-        }
-
-        // Pipe to act like a readable stream
-        this.emit("data", row, this);
-
-        // Data is only piped to event emitter when stream reader is not passed
-        if (!this.streamReader) {
-          return;
-        }
-
-        // Increment counters while processing
-        counter++;
-        this.streamReader(row, responseRowIndex++, this)
-          .then(() => {
-            if (--counter < 1 && finished && this.stream === stream) {
-              this.resolveRequest(ResolutionType.Default);
-            }
-          })
-          // Bubble any stream reader errors back to the caller
-          .catch((e) => {
-            if (this.stream === stream) {
-              this.stream.cancel();
-              this.resolveRequest(ResolutionType.Default, e);
-            }
-          });
+    const onData = (row: ResponseType) => {
+      if (this.stream !== stream) {
+        return removeListeners();
       }
-    });
 
-    // End event should trigger closure of request as long
-    // as all stream reader operations are complete
-    stream.on("end", () => {
-      if (finished) {
+      // Signal first response from the server
+      if (responseRowIndex === 0) {
+        this.emit("response", this);
+      }
+
+      // Pipe to act like a readable stream
+      this.emit("data", row, this);
+
+      // Stream reader is optional
+      if (!this.streamReader) {
         return;
       }
-      finished = true;
 
-      if (this.stream === stream && counter < 1) {
-        this.resolveRequest(ResolutionType.Default);
-      }
-    });
+      // Increment counters while processing
+      counter++;
+      this.streamReader(row, responseRowIndex++, this)
+        .then(() => {
+          if (--counter < 1 && ended && this.stream === stream) {
+            this.resolveRequest(ResolutionType.Default);
+          }
+        })
+        // Bubble any stream reader errors back to the caller
+        .catch((e) => {
+          if (this.stream === stream) {
+            this.stream.cancel();
+            this.resolveRequest(ResolutionType.Default, e);
+          }
+        });
+    };
 
     // Any service error should kill the stream
-    stream.on("error", (e) => {
-      if (finished) {
-        return;
-      }
-      finished = true;
+    const onError = (e: Error) => {
+      ended = true;
+      removeListeners();
 
       if (this.stream === stream) {
         this.resolveRequest(ResolutionType.Default, e);
       }
-    });
+    };
+
+    // End event should trigger closure of request as long
+    // as all stream reader operations are complete
+    const onEnd = () => {
+      ended = true;
+      removeListeners();
+
+      if (this.stream === stream && counter < 1) {
+        this.resolveRequest(ResolutionType.Default);
+      }
+    };
+
+    // Drop listeners once request completes
+    const removeListeners = () => {
+      stream.off("data", onData);
+      stream.off("error", onError);
+      stream.off("end", onEnd);
+    };
+
+    // Start listening
+    stream.on("data", onData);
+    stream.on("error", onError);
+    stream.on("end", onEnd);
   }
 
   /**
@@ -845,42 +868,51 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
    */
   private proxyPipeStreamToServer(): void {
     const stream = this.writeStream;
-    if (!this.isRequestStream || !this.pipeStream || !stream) {
+    const pipeStream = this.pipeStream;
+    if (!this.isRequestStream || !pipeStream || !stream) {
       return;
     }
 
-    let finished = false;
-
-    // Listen for any new incoming data
-    this.pipeStream.on("data", (row) => {
-      if (!finished && this.stream === stream) {
+    // Transfer incoming data to the request stream
+    const onData = (row: RequestType) => {
+      if (this.stream === stream) {
         stream.write(row);
+      } else {
+        removeListeners();
       }
-    });
+    };
 
-    // Check for any errors on the piped stream
-    this.pipeStream.on("error", (e: unknown) => {
-      if (finished || this.stream !== stream) {
-        return;
+    // Cancel the request if there is an error in the pipe
+    const onError = (e: unknown) => {
+      removeListeners();
+      if (this.stream === stream) {
+        const error =
+          e instanceof Error ? e : new Error("Pipe stream error", { cause: e });
+
+        this.stream.cancel();
+        this.resolveRequest(ResolutionType.Default, error);
       }
+    };
 
-      const error =
-        e instanceof Error ? e : new Error("Pipe stream error", { cause: e });
-
-      finished = true;
-      this.stream.cancel();
-      this.resolveRequest(ResolutionType.Default, error);
-    });
-
-    // Close the request stream once the pipe stream ends
-    this.pipeStream.on("end", () => {
-      if (finished || this.stream !== stream) {
-        return;
+    // End the write stream when the pipe completes
+    const onEnd = () => {
+      removeListeners();
+      if (this.stream === stream) {
+        stream.end();
       }
+    };
 
-      finished = true;
-      stream.end();
-    });
+    const removeListeners = () => {
+      pipeStream.off("data", onData);
+      pipeStream.off("error", onError);
+      pipeStream.off("end", onEnd);
+      pipeStream.off("close", onEnd);
+    };
+
+    pipeStream.on("data", onData);
+    pipeStream.on("error", onError);
+    pipeStream.on("end", onEnd);
+    pipeStream.on("close", onEnd);
   }
 
   /**
@@ -938,11 +970,6 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       return;
     }
 
-    if (this.requestTimerId) {
-      clearTimeout(this.requestTimerId);
-      this.requestTimerId = undefined;
-    }
-
     this.stream = null;
     this.resolutionType = resolutionType;
 
@@ -953,7 +980,7 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       if (this.canRetry((error as ServiceError).code, resolutionType)) {
         this.retries++;
         this.emit("retry", this);
-        this.makeRequest();
+        return this.makeRequest();
       }
       // End request with an error
       else {
@@ -984,7 +1011,6 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
 
         this.endPromiseQueue = [];
         this.emit("error", error, this);
-        this.emit("end", this);
       }
     }
     // Successful response
@@ -994,6 +1020,9 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
       this.endPromiseQueue = [];
       this.emit("end", this);
     }
+
+    // Request fully resolved
+    this.emit("close", this);
   }
 
   /**
@@ -1031,13 +1060,6 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   ): boolean {
     // Request aborts can't be retried
     if (resolutionType === ResolutionType.Abort) {
-      return false;
-    }
-    // Prevent retry timeouts if configured to skip
-    else if (
-      resolutionType === ResolutionType.Timeout &&
-      this.retryOptions.retryOnClientTimeout === false
-    ) {
       return false;
     }
 
