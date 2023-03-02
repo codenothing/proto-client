@@ -1215,6 +1215,80 @@ export class ProtoRequest<RequestType, ResponseType> extends EventEmitter {
   }
 
   /**
+   * Pipes response data from this request through the transformer and out into
+   * a new event emitter. This can be useful for piping one client request to
+   * another with an async transformer on each message
+   * @param {DataTransformer} transformer Async function for transforming data
+   * @returns {EventEmitter} A new event emitter instance
+   */
+  public transform<OutputType>(
+    transformer: (data: ResponseType) => Promise<OutputType>
+  ): EventEmitter {
+    const emitter = new EventEmitter();
+
+    // Local refs
+    let counter = 0;
+    let ended = false;
+    let finished = false;
+
+    // Process each data chunk through the transformer
+    const onData = (data: ResponseType) => {
+      counter++;
+      transformer(data)
+        .then((output) => {
+          if (finished) {
+            return;
+          }
+
+          emitter.emit("data", output);
+          if (--counter < 1 && ended) {
+            finished = true;
+            emitter.emit("end");
+          }
+        })
+        .catch((e) => {
+          if (!finished) {
+            finished = true;
+            emitter.emit("error", e);
+          }
+        });
+    };
+
+    // Stop processing on error
+    const onError = (e: Error) => {
+      remoteEvents();
+      finished = true;
+      emitter.emit("error", e);
+    };
+
+    // Keep track of when there are no more data events incoming,
+    // but don't signal end on the emitter until after all transforms
+    // have completed
+    const onEnd = () => {
+      remoteEvents();
+      ended = true;
+      if (counter < 1) {
+        finished = true;
+        emitter.emit("end");
+      }
+    };
+
+    // Normalized event removal
+    const remoteEvents = () => {
+      this.off("data", onData);
+      this.off("error", onError);
+      this.off("end", onEnd);
+    };
+
+    // Bind stream events
+    this.on("data", onData);
+    this.on("error", onError);
+    this.on("end", onEnd);
+
+    return emitter;
+  }
+
+  /**
    * Aborts the request if it is still active
    */
   public abort(): void {

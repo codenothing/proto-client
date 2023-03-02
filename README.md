@@ -65,7 +65,9 @@ const request = client.getServerStreamRequest("v1.Customers.FindCustomers", {
 
 await client.makeBidiStreamRequest(
   "v1.Customers.CreateCustomers",
-  request,
+  request.transform(async (customer) => {
+    return { ...customer, isCopied: true };
+  }),
   async (row) => {
     row; // Incoming response row chunk
   }

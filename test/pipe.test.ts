@@ -142,4 +142,93 @@ describe("pipe", () => {
     await request.waitForEnd();
     expect(request.error?.message).toStrictEqual(`Pipe stream error`);
   });
+
+  describe("transform", () => {
+    test("should handle piping a transformed request to another client request", async () => {
+      const readStreamRequest = getServerStreamRequest();
+      const { result } = await makeClientStreamRequest(
+        readStreamRequest.transform<Customer>(async (data) => {
+          return { id: data.id, name: data.name?.toUpperCase() };
+        })
+      );
+      expect(result).toEqual({
+        customers: [
+          { id: "github", name: "GITHUB" },
+          { id: "npm", name: "NPM" },
+          { id: "circleci", name: "CIRCLECI" },
+        ],
+      });
+    });
+
+    test("should handle a delay in transforming", async () => {
+      const readStreamRequest = getServerStreamRequest();
+      const { result } = await makeClientStreamRequest(
+        readStreamRequest.transform<Customer>(async (data) => {
+          await wait(5);
+          return { id: data.id, name: data.name?.toUpperCase() };
+        })
+      );
+      expect(result).toEqual({
+        customers: [
+          { id: "github", name: "GITHUB" },
+          { id: "npm", name: "NPM" },
+          { id: "circleci", name: "CIRCLECI" },
+        ],
+      });
+    });
+
+    test("should handle errors from the piped request", async () => {
+      THROW_FIND_ERROR = new MockServiceError(
+        status.INTERNAL,
+        `Mock Piped Request Error`
+      );
+      const readStreamRequest = getServerStreamRequest();
+      const { result, error } = await makeClientStreamRequest(
+        readStreamRequest.transform<Customer>(async (data) => {
+          await wait(5);
+          return { id: data.id, name: data.name?.toUpperCase() };
+        })
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toStrictEqual(
+        `13 INTERNAL: Mock Piped Request Error`
+      );
+      expect(result).toBeUndefined();
+    });
+
+    test("should handle transform errors", async () => {
+      const readStreamRequest = getServerStreamRequest();
+      const { result, error } = await makeClientStreamRequest(
+        readStreamRequest.transform(async () => {
+          await wait(5);
+          throw new Error(`Mock Transform Error`);
+        })
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toStrictEqual(`Mock Transform Error`);
+      expect(result).toBeUndefined();
+    });
+
+    test("should ignore all messages after a transform error", async () => {
+      let firstTransform = true;
+      const readStreamRequest = getServerStreamRequest();
+      const { result, error } = await makeClientStreamRequest(
+        readStreamRequest.transform(async (data) => {
+          if (firstTransform) {
+            firstTransform = false;
+            await wait(10);
+            throw new Error(`Mock Delayed Transform Error`);
+          } else {
+            await wait(20);
+            return { id: data.id, name: data.name?.toUpperCase() };
+          }
+        })
+      );
+      // Wait for the delayed transforms to complete
+      await wait(30);
+      expect(error).toBeInstanceOf(Error);
+      expect(error?.message).toStrictEqual(`Mock Delayed Transform Error`);
+      expect(result).toBeUndefined();
+    });
+  });
 });
